@@ -83,6 +83,34 @@ public struct AXApplicationFeatureProbe: Codable {
     public var settable: AXCapturedAttribute
 }
 
+public struct AXReferencedWindowDiagnostic: Codable {
+    /// The reference is read only for diagnostics. No handle bytes or window content are persisted.
+    public var read: AXCapturedAttribute
+    public var title: AXCapturedAttribute?
+    public var position: AXCapturedAttribute?
+    public var size: AXCapturedAttribute?
+    public var bounds: CGRect?
+    /// Indices from AXWindows whose handles compare equal to this reference; never fallback candidates.
+    public var matchingCandidateIndices: [Int]?
+}
+
+public struct AXApplicationStateDiagnostic: Codable {
+    public var observedAt: Date
+    public var hidden: AXCapturedAttribute
+    public var frontmost: AXCapturedAttribute
+    public var focusedWindow: AXReferencedWindowDiagnostic
+    public var mainWindow: AXReferencedWindowDiagnostic
+}
+
+public enum AXWindowSelectionFailureReason: String, Codable {
+    case emptyWindowInventory = "empty_window_inventory"
+    case windowInventoryUnavailable = "window_inventory_unavailable"
+    case incompleteWindowInventory = "incomplete_window_inventory"
+    case uncertainWindowMatch = "uncertain_window_match"
+    case ambiguousWindowMatch = "ambiguous_window_match"
+    case noMatchingWindow = "no_matching_window"
+}
+
 public struct AXApplicationDiagnosticResult: Codable {
     public var pid: Int32
     public var observedAt: Date
@@ -96,6 +124,8 @@ public struct AXApplicationDiagnosticResult: Codable {
     public var accessibilityFeatures: [String: AXApplicationFeatureProbe]
     public var inspectionAttempts: Int = 1
     public var retryHistory: [String]? = nil
+    public var applicationState: AXApplicationStateDiagnostic? = nil
+    public var failureReason: AXWindowSelectionFailureReason? = nil
 
     /// Suitable for error logs: retain matching evidence without reproducing window titles.
     public var summary: String {
@@ -108,7 +138,17 @@ public struct AXApplicationDiagnosticResult: Codable {
             let value = probe.value.value?.boolean.map(String.init) ?? probe.value.value.map { "type:\($0.type)" } ?? probe.value.status
             return "\(key){declared=\(declared),value=\(value),settable=\(probe.settable.value?.boolean.map(String.init) ?? probe.settable.status)}"
         }.joined(separator: "; ")
-        return "inspectionAttempts=\(inspectionAttempts); AXWindows status=\(windowsRead.status),error=\(windowsRead.errorCode.map(String.init) ?? "none"),entries=\(windowEntryCount.map(String.init) ?? "unknown"),validCandidates=\(validWindowCount); candidates=[\(candidateSummary)]; features=[\(featureSummary)]"
+        var stateSummary = "not_recorded"
+        if let state = applicationState {
+            func flag(_ attribute: AXCapturedAttribute) -> String {
+                "\(attribute.status):\(attribute.value?.boolean.map(String.init) ?? "unknown")"
+            }
+            func reference(_ window: AXReferencedWindowDiagnostic) -> String {
+                "read=\(window.read.status),title=\(window.title?.status ?? "not_read"),titleCharacters=\(window.title?.value?.text?.count ?? 0),position=\(window.position?.status ?? "not_read"),size=\(window.size?.status ?? "not_read"),candidateIndices=\(String(describing: window.matchingCandidateIndices)),bounds=\(String(describing: window.bounds))"
+            }
+            stateSummary = "hidden=\(flag(state.hidden)),frontmost=\(flag(state.frontmost)),focusedWindow={\(reference(state.focusedWindow))},mainWindow={\(reference(state.mainWindow))}"
+        }
+        return "inspectionAttempts=\(inspectionAttempts); failureReason=\(failureReason?.rawValue ?? "none"); AXWindows status=\(windowsRead.status),error=\(windowsRead.errorCode.map(String.init) ?? "none"),entries=\(windowEntryCount.map(String.init) ?? "unknown"),validCandidates=\(validWindowCount); candidates=[\(candidateSummary)]; features=[\(featureSummary)]; applicationState={\(stateSummary)}"
     }
 }
 
@@ -128,6 +168,8 @@ public struct AXCaptureResult: Codable {
     public var totalTextCharacters: Int
     /// Read/membership status is retained even when no target-window focus node is available.
     public var focusRead: AXCapturedAttribute? = nil
+    /// Selection-time metadata, including any bounded inventory retry history, preserved on success.
+    public var windowSelectionDiagnostic: AXApplicationDiagnosticResult? = nil
 
     public var readableText: String {
         var lines = ["AX capture: pid=\(pid), window=\(windowTitle ?? "(untitled)"), match=\(windowMatch)",
@@ -419,6 +461,7 @@ public final class AXCollector {
                                completeness: limited ? "partial_budget_limited" : (readErrors ? "partial_read_errors" : "completed_requested_reads_application_exposure_unknown"),
                                options: options, totalTextCharacters: textCount)
         result.focusRead = focusRead
+        result.windowSelectionDiagnostic = selection.2
         return result
     }
 
@@ -575,10 +618,40 @@ public final class AXCollector {
         } else {
             windowsRead = AXCapturedAttribute(status: value == nil ? "empty_result" : "invalid_value_type", value: nil, settable: nil, errorCode: 0, note: "AXWindows succeeded without an element array; this is distinct from an empty window array.")
         }
-        let result = AXApplicationDiagnosticResult(pid: pid, observedAt: Date(), accessibilityTrusted: Self.isAccessibilityTrusted,
+        var result = AXApplicationDiagnosticResult(pid: pid, observedAt: Date(), accessibilityTrusted: Self.isAccessibilityTrusted,
             attributeNamesRead: namesRead, availableAttributes: names, windowsRead: windowsRead,
             windowEntryCount: entryCount, validWindowCount: validCount, candidates: windows.map { $0.1 }, accessibilityFeatures: features)
+        // This follows the inventory so optional diagnostic reads cannot consume the budget
+        // before the requested window candidates are inspected. Every read checks the same
+        // original deadline and records capture_deadline if it could not be started.
+        result.applicationState = AXApplicationStateDiagnostic(observedAt: Date(),
+            hidden: diagnosticAttribute(app, attribute: "AXHidden"),
+            frontmost: diagnosticAttribute(app, attribute: "AXFrontmost"),
+            focusedWindow: diagnosticWindowReference(app, attribute: "AXFocusedWindow", candidates: windows),
+            mainWindow: diagnosticWindowReference(app, attribute: "AXMainWindow", candidates: windows))
         return (result, windows)
+    }
+
+    private func diagnosticWindowReference(_ app: AXUIElement, attribute: String,
+                                           candidates: [(AXUIElement, AXWindowDiagnostic)]) -> AXReferencedWindowDiagnostic {
+        guard budgetAvailable() else {
+            return AXReferencedWindowDiagnostic(read: AXCapturedAttribute(status: "capture_deadline", value: nil,
+                settable: nil, errorCode: nil, note: "Window reference read was not started after the original deadline."))
+        }
+        let reference = elementWithStatus(app, attribute)
+        var result = AXReferencedWindowDiagnostic(read: reference.status)
+        guard let window = reference.element else { return result }
+        result.read.note = "AX window reference was read for metadata only; it is not a fallback capture target."
+        result.matchingCandidateIndices = candidates.compactMap { CFEqual($0.0, window) ? $0.1.index : nil }
+        AXUIElementSetMessagingTimeout(window, 0.25)
+        result.title = diagnosticAttribute(window, attribute: "AXTitle")
+        result.position = diagnosticAttribute(window, attribute: "AXPosition")
+        result.size = diagnosticAttribute(window, attribute: "AXSize")
+        if let x = result.position?.value?.components?["x"], let y = result.position?.value?.components?["y"],
+           let width = result.size?.value?.components?["width"], let height = result.size?.value?.components?["height"] {
+            result.bounds = CGRect(x: x, y: y, width: width, height: height)
+        }
+        return result
     }
 
     private func diagnosticAttribute(_ element: AXUIElement, attribute: String) -> AXCapturedAttribute {
@@ -589,7 +662,7 @@ public final class AXCollector {
         return failure(error)
     }
 
-    private func selectWindow(app: AXUIElement, title: String?, bounds: CGRect?) throws -> (AXUIElement, String) {
+    private func selectWindow(app: AXUIElement, title: String?, bounds: CGRect?) throws -> (AXUIElement, String, AXApplicationDiagnosticResult) {
         var pid: pid_t = 0
         AXUIElementGetPid(app, &pid)
         var inspection = applicationInspection(app: app, pid: pid)
@@ -605,25 +678,42 @@ public final class AXCollector {
             }
         }
         let diagnostic = inspection.result
-        guard diagnostic.windowsRead.status == "ok" else {
-            throw AXCaptureError.windowInspectionFailed("Cannot read a usable AX window inventory.", diagnostic)
+        func failed(_ reason: AXWindowSelectionFailureReason, _ message: String) -> AXCaptureError {
+            var evidence = diagnostic
+            evidence.failureReason = reason
+            return .windowInspectionFailed(message, evidence)
         }
-        guard diagnostic.validWindowCount == inspection.windows.count else {
-            throw AXCaptureError.windowInspectionFailed("AX window candidate inventory was incomplete because of a candidate/time limit; refusing incomplete matching.", diagnostic)
+        if let reason = Self.windowInventoryFailureReason(diagnostic) {
+            switch reason {
+            case .emptyWindowInventory:
+                throw failed(reason, "AXWindows succeeded but returned an empty window inventory.")
+            case .incompleteWindowInventory:
+                throw failed(reason, "AX window candidate inventory was incomplete or contained invalid references; refusing incomplete matching.")
+            default:
+                throw failed(reason, "Cannot read a usable AX window inventory.")
+            }
         }
         let windows = inspection.windows
         if title == nil && bounds == nil {
-            if let focused = rawElement(app, "AXFocusedWindow"), windows.contains(where: { CFEqual($0.0, focused) }) { return (focused, "focused_window") }
-            if windows.count == 1 { return (windows[0].0, "single_window") }
-            throw AXCaptureError.windowInspectionFailed("No unique focused/single AX window could be selected.", diagnostic)
+            if let focused = rawElement(app, "AXFocusedWindow"), windows.contains(where: { CFEqual($0.0, focused) }) { return (focused, "focused_window", diagnostic) }
+            if windows.count == 1 { return (windows[0].0, "single_window", diagnostic) }
+            throw failed(.ambiguousWindowMatch, "No unique focused/single AX window could be selected.")
         }
         let assessment = Self.assessWindowMatches(windows.map { $0.1 }, title: title, bounds: bounds)
-        if let index = assessment.uniqueMatchIndex { return (windows[index].0, bounds == nil ? "exact_title" : (title == nil ? "bounds_within_3_points" : "exact_title_and_bounds_within_3_points")) }
+        if let index = assessment.uniqueMatchIndex { return (windows[index].0, bounds == nil ? "exact_title" : (title == nil ? "bounds_within_3_points" : "exact_title_and_bounds_within_3_points"), diagnostic) }
         if !assessment.cannotExclude.isEmpty {
-            throw AXCaptureError.windowInspectionFailed("\(assessment.matches.count) AX windows matched, but \(assessment.cannotExclude.count) other candidates could not be excluded because matching metadata was unavailable; refusing an uncertain choice.", diagnostic)
+            throw failed(.uncertainWindowMatch, "\(assessment.matches.count) AX windows matched, but \(assessment.cannotExclude.count) other candidates could not be excluded because matching metadata was unavailable; refusing an uncertain choice.")
         }
-        if assessment.matches.count > 1 { throw AXCaptureError.windowInspectionFailed("\(assessment.matches.count) AX windows matched; refusing an arbitrary choice.", diagnostic) }
-        throw AXCaptureError.windowInspectionFailed("No AX window matched requested title (\(title?.count ?? 0) characters) and bounds \(String(describing: bounds)).", diagnostic)
+        if assessment.matches.count > 1 { throw failed(.ambiguousWindowMatch, "\(assessment.matches.count) AX windows matched; refusing an arbitrary choice.") }
+        throw failed(.noMatchingWindow, "No AX window matched requested title (\(title?.count ?? 0) characters) and bounds \(String(describing: bounds)).")
+    }
+
+    /// An empty successful array is different from a failed/nil/malformed AXWindows read.
+    static func windowInventoryFailureReason(_ diagnostic: AXApplicationDiagnosticResult) -> AXWindowSelectionFailureReason? {
+        guard diagnostic.windowsRead.status == "ok", let count = diagnostic.windowEntryCount else { return .windowInventoryUnavailable }
+        if count == 0 { return .emptyWindowInventory }
+        if count != diagnostic.validWindowCount || diagnostic.validWindowCount != diagnostic.candidates.count { return .incompleteWindowInventory }
+        return nil
     }
 
     struct WindowMatchAssessment {

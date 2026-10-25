@@ -148,6 +148,67 @@ struct AXSerializationTests {
         #expect(assessment.uniqueMatchIndex == 0)
     }
 
+    @Test func windowInventoryFailureReasonsDoNotTreatReferenceMetadataAsFallback() {
+        let ok = AXCapturedAttribute(status: "ok", value: nil, settable: nil, errorCode: 0, note: nil)
+        let candidate = windowCandidate(title: "Document")
+        let reference = AXReferencedWindowDiagnostic(read: ok, title: candidate.title,
+            position: candidate.position, size: candidate.size, bounds: candidate.bounds, matchingCandidateIndices: [])
+        var diagnostic = AXApplicationDiagnosticResult(pid: 1, observedAt: Date(), accessibilityTrusted: true,
+            attributeNamesRead: ok, availableAttributes: [], windowsRead: ok, windowEntryCount: 0,
+            validWindowCount: 0, candidates: [], accessibilityFeatures: [:])
+        diagnostic.applicationState = AXApplicationStateDiagnostic(observedAt: Date(), hidden: ok,
+            frontmost: ok, focusedWindow: reference, mainWindow: reference)
+        // A usable focused/main-window reference cannot rescue an empty AXWindows inventory.
+        #expect(AXCollector.windowInventoryFailureReason(diagnostic) == .emptyWindowInventory)
+        for status in ["cannot_complete", "no_value", "empty_result", "invalid_value_type"] {
+            diagnostic.windowsRead.status = status
+            #expect(AXCollector.windowInventoryFailureReason(diagnostic) == .windowInventoryUnavailable)
+        }
+        diagnostic.windowsRead.status = "ok"
+        diagnostic.windowEntryCount = 2
+        diagnostic.validWindowCount = 2
+        diagnostic.candidates = [candidate]
+        #expect(AXCollector.windowInventoryFailureReason(diagnostic) == .incompleteWindowInventory)
+        diagnostic.windowEntryCount = 1
+        diagnostic.validWindowCount = 1
+        #expect(AXCollector.windowInventoryFailureReason(diagnostic) == nil)
+    }
+
+    @Test func applicationStateAndSuccessfulSelectionEvidenceSurviveJSONWithoutSummaryTitleDisclosure() throws {
+        let ok = AXCapturedAttribute(status: "ok", value: AXSnapshotValue(type: "boolean", boolean: false), settable: nil, errorCode: 0, note: nil)
+        let failed = AXCapturedAttribute(status: "cannot_complete", value: nil, settable: nil,
+            errorCode: Int(AXError.cannotComplete.rawValue), note: nil)
+        let candidate = windowCandidate(title: "private-window-title")
+        let focused = AXReferencedWindowDiagnostic(read: failed)
+        let main = AXReferencedWindowDiagnostic(read: AXCapturedAttribute(status: "ok", value: nil, settable: nil, errorCode: 0, note: nil),
+            title: candidate.title, position: candidate.position, size: candidate.size,
+            bounds: candidate.bounds, matchingCandidateIndices: [0])
+        var diagnostic = AXApplicationDiagnosticResult(pid: 1, observedAt: Date(), accessibilityTrusted: true,
+            attributeNamesRead: ok, availableAttributes: [], windowsRead: ok, windowEntryCount: 1,
+            validWindowCount: 1, candidates: [candidate], accessibilityFeatures: [:])
+        diagnostic.applicationState = AXApplicationStateDiagnostic(observedAt: Date(), hidden: ok,
+            frontmost: failed, focusedWindow: focused, mainWindow: main)
+        diagnostic.inspectionAttempts = 2
+        diagnostic.retryHistory = ["AXWindows status=cannot_complete", "AXWindows status=ok"]
+        #expect(diagnostic.summary.contains("private-window-title") == false)
+        #expect(diagnostic.summary.contains("frontmost=cannot_complete"))
+        var capture = AXCaptureResult(pid: 1, windowTitle: nil, windowMatch: "exact_title", rootNodeID: "n0",
+            focusedNodeID: nil, nodes: [], diagnostics: [], startedAt: Date(), finishedAt: Date(),
+            durationSeconds: 0, completeness: "partial_read_errors", options: AXCaptureOptions(), totalTextCharacters: 0)
+        capture.windowSelectionDiagnostic = diagnostic
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let restored = try decoder.decode(AXCaptureResult.self, from: SnapshotStore.encoder.encode(capture))
+        #expect(restored.windowSelectionDiagnostic?.inspectionAttempts == 2)
+        #expect(restored.windowSelectionDiagnostic?.retryHistory?.first == "AXWindows status=cannot_complete")
+        #expect(restored.windowSelectionDiagnostic?.applicationState?.focusedWindow.read.errorCode == Int(AXError.cannotComplete.rawValue))
+        #expect(restored.windowSelectionDiagnostic?.applicationState?.mainWindow.title?.value?.text == "private-window-title")
+        diagnostic.failureReason = .uncertainWindowMatch
+        let error = AXCaptureError.windowInspectionFailed("Unknown candidate", diagnostic)
+        let encodedErrorEvidence = try SnapshotStore.encoder.encode(try #require(error.applicationDiagnostic))
+        #expect(String(decoding: encodedErrorEvidence, as: UTF8.self).contains("uncertain_window_match"))
+    }
+
     private func windowCandidate(title: String, bounds: CGRect = CGRect(x: 10, y: 20, width: 640, height: 480)) -> AXWindowDiagnostic {
         func attribute(_ value: AXSnapshotValue) -> AXCapturedAttribute {
             AXCapturedAttribute(status: "ok", value: value, settable: nil, errorCode: nil, note: nil)
