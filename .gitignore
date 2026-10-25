@@ -3,6 +3,7 @@
 .DS_Store
 Captures/
 LocalEvidence/
+Edits/
 Ref/
 __pycache__/
 *.pyc
