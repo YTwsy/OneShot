@@ -1,8 +1,42 @@
 # OneShot
 
-独立的应用截图与上下文分享工具。优先支持 macOS，提供 Pinpoint 类似的用户界面与标注体验，并以接近 Codex 原生 Appshots 的信息完整度为采集目标，同时提供通用 MCP 接口。
+独立的应用截图与上下文分享工具。当前先验证 macOS 采集核心，以用户提供的三份 Codex 原生 AppShot 为信息覆盖参考。截图交互、标注编辑、评论和通用 MCP 交付在采集验证之后推进。
 
-状态：需求记录，尚未开始实现。记录日期：2026-10-25。
+状态：已开始实现独立 Swift 采集原型。基准日期：2026-10-25。原型以 macOS 14+、Swift 6 工具链构建；这不是最终产品的平台承诺。
+
+## 当前阶段
+
+- [采集完整度基准](docs/capture-baseline.md)：三份样本实际证明的信息范围、未验证能力与逐项验收方法。
+- [Codex Desktop AppShot 调查](docs/codex-appshot-investigation.md)：本机原生服务、富文本提取线索、公开与内部接口的复用边界。
+- 独立实现 CoreGraphics 窗口定位、ScreenCaptureKit 截图、AX 结构与参数化富文本读取、可选 Vision 中文／英文 OCR。
+- 不按视口或元素尺寸剪裁语义遍历；保留来源、类型、选择／焦点、预算、读取失败和截断诊断。
+- 每次捕获保存到新的本地目录。读取已有捕获不重新访问应用；AX 失败也可独立保留成功取得的截图。
+
+## 构建与采集
+
+```sh
+swift build --disable-sandbox
+zsh scripts/test.sh
+zsh scripts/build-probe.sh
+```
+
+本机开发版位于 `.build/OneShot Probe.app`，仅做 ad-hoc 签名，未公证。辅助功能授权与屏幕录制授权属于实际执行的应用身份；Codex 自身已获授权不代表 OneShot 已获授权。先从固定的 bundle 路径运行诊断：
+
+```sh
+".build/OneShot Probe.app/Contents/MacOS/oneshot" doctor
+open ".build/OneShot Probe.app" --args authorize
+```
+
+`authorize` 是唯一主动显示 macOS 系统授权入口的命令，需要用户在系统设置中批准。其余命令不修改权限、应用设置、焦点或滚动位置。开发版重新构建后应再次检查授权。
+
+```sh
+".build/OneShot Probe.app/Contents/MacOS/oneshot" windows --app com.apple.Music
+".build/OneShot Probe.app/Contents/MacOS/oneshot" capture --app com.apple.Music --output Captures/music-001 --ocr
+".build/OneShot Probe.app/Contents/MacOS/oneshot" read --capture Captures/music-001
+python3 scripts/summarize_capture.py Captures/music-001
+```
+
+多个窗口时必须显式指定 `--window-id`。输出目录必须不存在，程序拒绝覆盖。`--no-image` 可单独实验 AX；`--timeout`、`--max-nodes`、`--max-depth`、`--max-text-characters` 控制采集预算。截图与 AX 分别记录时间，窗口身份检查不能证明内容原子一致。`Ref/` 原始参考图与 `Captures/`、`LocalEvidence/` 实际捕获留在本机，Git 不收录这些数据。
 
 ## 核心需求
 
@@ -21,13 +55,13 @@
 
 | 应用 | 重点 |
 | --- | --- |
-| 音乐 | 搜索内容、歌曲列表、播放控件及状态、音量、焦点 |
+| 音乐 | 专辑／音轨、侧栏层级、控件角色与数值类型、选择／展开、音量、焦点；搜索词与播放进度另行补测 |
 | OpenSurge | 内嵌 WebView 的节点、延迟、协议、检测时间、策略状态及已暴露的视口外文本 |
-| Cursor | 文件／窗口 URL、编辑器文本与选中内容；AX 不可用时的说明及中文 OCR 补充 |
+| Cursor | 文件与工作台 URL、编辑器长文本、多区域层级、控件选择与焦点；精确文本选区、AX 失败与中文 OCR 另行补测 |
 
 ## 实现与复用方向（待验证）
 
-- 以 Pinpoint 的交互和标注为基础，增强捕获核心，可以参考开源 Appshots／Peekaboo 的采集实现，但是不要被这些实现束缚，这些只是潜在参考。
+- 独立建立采集核心，以实际信息覆盖决定方案；开源 Appshots／Peekaboo 是潜在实现参考，不预设为底座。Pinpoint／Remarc 的交互、标注与评论在后续阶段评估。
 - GUI 与 MCP 共享捕获核心和快照存储，保留完整结果，按需向 Agent 返回。
 - 根据实测补充 WebView、浏览器、编辑器适配及中文 OCR；浏览器扩展不能直接覆盖任意 App 的内嵌 WebView。
 - 原生 Codex Appshots 捕获器能否独立复用仍未验证，不作为已确定的产品依赖。

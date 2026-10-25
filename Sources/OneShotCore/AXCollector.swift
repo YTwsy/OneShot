@@ -1,0 +1,664 @@
+import AppKit
+import ApplicationServices
+import Foundation
+
+public struct AXCaptureOptions: Codable {
+    public var maxNodes: Int
+    public var maxDepth: Int
+    public var timeoutSeconds: Double
+    public var maxTextCharacters: Int
+    public var maxTotalTextCharacters: Int
+    public init(maxNodes: Int = 12_000, maxDepth: Int = 100, timeoutSeconds: Double = 20,
+                maxTextCharacters: Int = 2_000_000, maxTotalTextCharacters: Int = 8_000_000) {
+        self.maxNodes = maxNodes; self.maxDepth = maxDepth; self.timeoutSeconds = timeoutSeconds
+        self.maxTextCharacters = maxTextCharacters; self.maxTotalTextCharacters = maxTotalTextCharacters
+    }
+}
+
+public struct AXCaptureDiagnostic: Codable {
+    public var code: String
+    public var message: String
+    public var nodeID: String?
+    public var attribute: String?
+}
+
+public struct AXTextRun: Codable {
+    public var location: Int
+    public var length: Int
+    public var attributes: [String: String]
+}
+
+/// Each value retains its native category. Rich-text ranges use UTF-16 offsets, as AX does.
+public struct AXSnapshotValue: Codable {
+    public var type: String
+    public var text: String?
+    public var number: Double?
+    public var boolean: Bool?
+    public var components: [String: Double]?
+    public var elements: [AXSnapshotValue]?
+    public var runs: [AXTextRun]?
+    public var originalCharacterCount: Int?
+    public var truncated: Bool?
+    public init(type: String, text: String? = nil, number: Double? = nil, boolean: Bool? = nil,
+                components: [String: Double]? = nil, elements: [AXSnapshotValue]? = nil,
+                runs: [AXTextRun]? = nil, originalCharacterCount: Int? = nil, truncated: Bool? = nil) {
+        self.type = type; self.text = text; self.number = number; self.boolean = boolean
+        self.components = components; self.elements = elements; self.runs = runs
+        self.originalCharacterCount = originalCharacterCount; self.truncated = truncated
+    }
+}
+
+public struct AXCapturedAttribute: Codable {
+    public var status: String
+    public var value: AXSnapshotValue?
+    public var settable: Bool?
+    public var errorCode: Int?
+    public var note: String?
+}
+
+public struct AXSnapshotNode: Codable {
+    public var id: String
+    public var depth: Int
+    /// First-discovery parent through the named traversal relations, not an inferred AXParent.
+    public var parentID: String?
+    public var availableAttributes: [String]
+    public var parameterizedAttributes: [String]
+    public var attributes: [String: AXCapturedAttribute]
+    public var relations: [String: [String]]
+    public var omittedAttributes: [String: String]
+}
+
+public struct AXCaptureResult: Codable {
+    public var pid: Int32
+    public var windowTitle: String?
+    public var windowMatch: String
+    public var rootNodeID: String
+    public var focusedNodeID: String?
+    public var nodes: [AXSnapshotNode]
+    public var diagnostics: [AXCaptureDiagnostic]
+    public var startedAt: Date
+    public var finishedAt: Date
+    public var durationSeconds: Double
+    public var completeness: String
+    public var options: AXCaptureOptions
+    public var totalTextCharacters: Int
+    /// Read/membership status is retained even when no target-window focus node is available.
+    public var focusRead: AXCapturedAttribute? = nil
+
+    public var readableText: String {
+        var lines = ["AX capture: pid=\(pid), window=\(windowTitle ?? "(untitled)"), match=\(windowMatch)",
+                     "Completeness: \(completeness); nodes=\(nodes.count); focus=\(focusedNodeID ?? "unavailable")"]
+        if let focusRead = focusRead { lines.append("Focus read: \(focusRead.status)\(focusRead.errorCode.map { "; AX error=\($0)" } ?? "")\(focusRead.note.map { "; \($0)" } ?? "")") }
+        for node in nodes {
+            let indent = String(repeating: "  ", count: min(node.depth, 30))
+            let role = node.attributes["AXRole"]?.value?.text ?? "unknown role"
+            lines.append("\(indent)[\(node.id)] \(role)\(node.id == focusedNodeID ? " (focused)" : "")")
+            for key in node.attributes.keys.sorted() {
+                guard let attribute = node.attributes[key] else { continue }
+                if let value = attribute.value {
+                    let rendered: String
+                    if let text = value.text { rendered = text }
+                    else if let boolean = value.boolean { rendered = String(boolean) }
+                    else if let number = value.number { rendered = String(number) }
+                    else if let parts = value.components { rendered = parts.keys.sorted().map { "\($0)=\(parts[$0]!)" }.joined(separator: ", ") }
+                    else if let elements = value.elements { rendered = elements.map { $0.text ?? $0.number.map { String($0) } ?? $0.type }.joined(separator: ", ") }
+                    else { rendered = "(\(value.type))" }
+                    lines.append("\(indent)  \(key) [\(value.type)\(attribute.settable.map { ", settable=\($0)" } ?? "")]: \(rendered)")
+                    if value.truncated == true { lines.append("\(indent)    [TRUNCATED; original characters=\(value.originalCharacterCount ?? -1)]") }
+                } else if attribute.status != "no_value" && attribute.status != "unsupported" {
+                    lines.append("\(indent)  \(key): [\(attribute.status)] \(attribute.note ?? "")")
+                }
+            }
+            for relation in node.relations.keys.sorted() { lines.append("\(indent)  \(relation): [\(node.relations[relation, default: []].joined(separator: ", "))]") }
+            for key in node.omittedAttributes.keys.sorted() { lines.append("\(indent)  \(key): [omitted: \(node.omittedAttributes[key]!)]") }
+        }
+        if !diagnostics.isEmpty {
+            lines.append("\nDiagnostics:")
+            lines += diagnostics.map { "- \($0.code)\($0.nodeID.map { " [\($0)]" } ?? "")\($0.attribute.map { " \($0)" } ?? ""): \($0.message)" }
+        }
+        return lines.joined(separator: "\n") + "\n"
+    }
+}
+
+public enum AXCaptureError: LocalizedError {
+    case permissionDenied
+    case invalidOptions
+    case windowsUnavailable(Int)
+    case windowNotFound(String)
+    case ambiguousWindow(Int)
+    public var errorDescription: String? {
+        switch self {
+        case .permissionDenied: return "Accessibility permission is not granted to this capture process. No permission prompt or setting change was attempted."
+        case .invalidOptions: return "AX capture budgets must be positive and finite."
+        case .windowsUnavailable(let code): return "Cannot read application AXWindows (AX error \(code))."
+        case .windowNotFound(let details): return "Cannot match the requested screenshot window to an AX window: \(details)"
+        case .ambiguousWindow(let count): return "\(count) AX windows match the request; refusing to choose an arbitrary window."
+        }
+    }
+}
+
+/// Passive, window-scoped AX reader. It never sets UI attributes or enables Electron accessibility.
+/// A declared parameterized text API can be used without importing private frameworks.
+public final class AXCollector {
+    public let options: AXCaptureOptions
+    private var diagnostics: [AXCaptureDiagnostic] = []
+    private var elements: [AXUIElement] = []
+    private var buckets: [CFHashCode: [Int]] = [:]
+    private var queue: [(index: Int, depth: Int, parentID: String?)] = []
+    private var deadline: TimeInterval = 0
+    private var textCount = 0
+    private var limited = false
+    private var readErrors = false
+    private var deadlineReported = false
+    private var nodeLimitReported = false
+    private var pendingReferences: [(nodeID: String, attribute: String, targets: [AXUIElement])] = []
+    private var referenceCount = 0
+    private let childRelations: Set<String> = ["AXChildren", "AXRows", "AXContents", "AXColumns", "AXTabs"]
+    private let referenceRelations: Set<String> = ["AXSelectedChildren", "AXTitleUIElement", "AXLinkedUIElements"]
+    private let nonTraversedRelations: Set<String> = ["AXParent", "AXWindow", "AXTopLevelUIElement", "AXServesAsTitleForUIElements", "AXSharedTextUIElements", "AXVisibleChildren", "AXVisibleRows", "AXVisibleColumns", "AXFocusedUIElement"]
+    private let fallbackAttributes = ["AXRole", "AXSubrole", "AXRoleDescription", "AXTitle", "AXDescription", "AXHelp", "AXValue", "AXURL", "AXDocument", "AXIdentifier", "AXEnabled", "AXSelected", "AXExpanded", "AXFocused", "AXPosition", "AXSize", "AXSelectedText", "AXSelectedTextRange", "AXNumberOfCharacters"]
+    private let secureMetadataAttributes: Set<String> = ["AXRole", "AXSubrole", "AXRoleDescription", "AXTitle", "AXDescription", "AXHelp", "AXIdentifier", "AXEnabled", "AXFocused", "AXPosition", "AXSize", "AXRequired", "AXInvalid"]
+
+    public init(options: AXCaptureOptions = AXCaptureOptions()) { self.options = options }
+    public static var isAccessibilityTrusted: Bool { AXIsProcessTrusted() }
+
+    public func capture(pid: pid_t, windowTitle: String?, windowBounds: CGRect?) throws -> AXCaptureResult {
+        guard Self.isAccessibilityTrusted else { throw AXCaptureError.permissionDenied }
+        guard options.maxNodes > 0, options.maxDepth > 0, options.timeoutSeconds > 0,
+              options.timeoutSeconds.isFinite, options.maxTextCharacters > 0, options.maxTotalTextCharacters > 0 else { throw AXCaptureError.invalidOptions }
+        diagnostics = []; elements = []; buckets = [:]; queue = []; pendingReferences = []; referenceCount = 0; textCount = 0
+        limited = false; readErrors = false; deadlineReported = false; nodeLimitReported = false
+        let startedAt = Date(), start = ProcessInfo.processInfo.systemUptime
+        deadline = start + options.timeoutSeconds
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, Float(min(0.25, options.timeoutSeconds)))
+        let selection = try selectWindow(app: app, title: windowTitle, bounds: windowBounds)
+        let root = selection.0
+        let rootID = register(root, depth: 0, parentID: nil)!
+        var focusedElement: AXUIElement?
+        var unverifiedFocusElement: AXUIElement?
+        let focusResult = elementWithStatus(app, "AXFocusedUIElement")
+        var focusRead = focusResult.status
+        if let focus = focusResult.element {
+            if CFEqual(focus, root) {
+                focusedElement = root
+            } else {
+                let focusWindow = elementWithStatus(focus, "AXWindow")
+                if let window = focusWindow.element {
+                    if CFEqual(window, root) { focusedElement = focus }
+                    else {
+                        focusRead.status = "outside_target_window"
+                        focusRead.note = "The application's focused element belongs to a different window; its content was not collected."
+                        note("focus_outside_target", focusRead.note!, attribute: "AXFocusedUIElement")
+                    }
+                } else {
+                    unverifiedFocusElement = focus
+                    focusRead.status = "window_membership_unresolved"
+                    focusRead.errorCode = focusWindow.status.errorCode
+                    focusRead.note = "Focused element was read, but AXWindow returned \(focusWindow.status.status). Only an existing node in the selected window's tree may resolve it."
+                    note("focus_window_read_failed", focusRead.note!, attribute: "AXWindow")
+                }
+            }
+        } else {
+            note("focus_read_\(focusRead.status)", "AXFocusedUIElement returned \(focusRead.status) (AX error \(focusRead.errorCode ?? 0)).", attribute: "AXFocusedUIElement")
+        }
+        var nodes: [AXSnapshotNode] = []
+        var cursor = 0
+        var focusFallbackAttempted = false
+        while budgetAvailable() {
+            if cursor >= queue.count {
+                if !focusFallbackAttempted, let focus = focusedElement, existingIndex(focus) == nil {
+                    focusFallbackAttempted = true
+                    if register(focus, depth: 0, parentID: nil) != nil {
+                        note("detached_focus_node", "Focus belongs to the target window but was absent from its traversed child relations; retained separately without inventing a parent.")
+                    }
+                }
+                if cursor >= queue.count { break }
+            }
+            let item = queue[cursor]; cursor += 1
+            let element = elements[item.index]
+            let id = identifier(item.index)
+            AXUIElementSetMessagingTimeout(element, Float(min(0.25, max(0.01, deadline - ProcessInfo.processInfo.systemUptime))))
+            var namesRef: CFArray?
+            let namesError = AXUIElementCopyAttributeNames(element, &namesRef)
+            let available = (namesRef as? [String]) ?? []
+            if namesError != .success { readErrors = true; note("attribute_names_failed", "AX error \(namesError.rawValue); trying standard attributes.", node: id) }
+            var parameterizedRef: CFArray?
+            let parameterizedError = AXUIElementCopyParameterizedAttributeNames(element, &parameterizedRef)
+            let parameterized = (parameterizedRef as? [String]) ?? []
+            if parameterizedError != .success && parameterizedError != .notImplemented && parameterizedError != .attributeUnsupported {
+                readErrors = true; note("parameterized_names_failed", "AX error \(parameterizedError.rawValue).", node: id)
+            }
+            let candidateNames = available.isEmpty ? fallbackAttributes : available
+            let role = rawString(element, "AXRole")
+            let subrole = rawString(element, "AXSubrole")
+            let secure = subrole == "AXSecureTextField" || role == "AXSecureTextField"
+            var attributes: [String: AXCapturedAttribute] = [:]
+            var omitted: [String: String] = [:]
+            var readNames: [String] = []
+            for name in candidateNames {
+                if childRelations.contains(name) || referenceRelations.contains(name) || nonTraversedRelations.contains(name) {
+                    if nonTraversedRelations.contains(name) { omitted[name] = "relationship_not_expanded; tree and focus are represented separately" }
+                } else if secure && !secureMetadataAttributes.contains(name) {
+                    omitted[name] = "secure_text_field"
+                } else { readNames.append(name) }
+            }
+            readNames.sort()
+            if budgetAvailable() && !readNames.isEmpty {
+                var valuesRef: CFArray?
+                let batchError = AXUIElementCopyMultipleAttributeValues(element, readNames as CFArray, [], &valuesRef)
+                if batchError == .success, let values = valuesRef as? [AnyObject], values.count == readNames.count {
+                    for (index, name) in readNames.enumerated() {
+                        attributes[name] = captured(values[index], node: id, attribute: name)
+                    }
+                } else {
+                    note("attribute_batch_fallback", "Batch AX read returned \(batchError.rawValue); reading requested attributes individually.", node: id)
+                    for name in readNames {
+                        guard budgetAvailable() else { omitted[name] = "capture_deadline"; continue }
+                        var value: CFTypeRef?
+                        let error = AXUIElementCopyAttributeValue(element, name as CFString, &value)
+                        attributes[name] = error == .success && value != nil ? captured(value!, node: id, attribute: name) : failure(error)
+                    }
+                }
+            }
+            // "settable" describes AXValue, not a blanket permission to mutate the node.
+            if attributes["AXValue"]?.status == "ok", budgetAvailable() {
+                var settable = DarwinBoolean(false)
+                let error = AXUIElementIsAttributeSettable(element, "AXValue" as CFString, &settable)
+                if error == .success { attributes["AXValue"]?.settable = settable.boolValue }
+                else { attributes["AXValue"]?.note = "Settable status unavailable (AX error \(error.rawValue))." }
+            }
+            if !secure { readParameterizedText(element, names: parameterized, node: id, attributes: &attributes) }
+            for reference in referenceRelations.sorted() where available.isEmpty || available.contains(reference) {
+                guard budgetAvailable() else { omitted[reference] = "capture_deadline"; continue }
+                attributes[reference] = readReferenceRelation(element, attribute: reference, node: id)
+            }
+            var relations: [String: [String]] = [:]
+            for relation in childRelations.sorted() where available.isEmpty || available.contains(relation) {
+                guard budgetAvailable() else { omitted[relation] = "capture_deadline"; continue }
+                var count: CFIndex = 0
+                let countError = AXUIElementGetAttributeValueCount(element, relation as CFString, &count)
+                var rawChildren: [AnyObject] = []
+                if countError == .success {
+                    let remaining = max(0, options.maxNodes - elements.count)
+                    // Even when the node budget is full, allow already-seen links to be recorded
+                    // within a bounded relation read. Never allocate an unbounded AX array.
+                    let requested = min(count, max(remaining, min(options.maxNodes, 512)))
+                    if requested > 0 {
+                        var ref: CFArray?
+                        let error = AXUIElementCopyAttributeValues(element, relation as CFString, 0, requested, &ref)
+                        if error == .success { rawChildren = (ref as? [AnyObject]) ?? [] }
+                        else { readErrors = true; note("relation_read_failed", "AX error \(error.rawValue).", node: id, attribute: relation) }
+                    }
+                    if requested < count { limited = true; note("relation_node_budget", "Read \(requested) of \(count) relationship entries because of the node budget.", node: id, attribute: relation) }
+                } else if countError != .attributeUnsupported && countError != .noValue {
+                    // AXContents can be a single element rather than an array.
+                    var value: CFTypeRef?
+                    let error = AXUIElementCopyAttributeValue(element, relation as CFString, &value)
+                    if error == .success, let value = value {
+                        if CFGetTypeID(value) == AXUIElementGetTypeID() { rawChildren = [value] }
+                        else { rawChildren = (value as? [AnyObject]) ?? [] }
+                    } else if error != .attributeUnsupported && error != .noValue {
+                        readErrors = true; note("relation_read_failed", "AX error \(error.rawValue).", node: id, attribute: relation)
+                    }
+                }
+                var ids: [String] = []
+                for raw in rawChildren where CFGetTypeID(raw) == AXUIElementGetTypeID() {
+                    let child = unsafeBitCast(raw, to: AXUIElement.self)
+                    if let childID = register(child, depth: item.depth + 1, parentID: id) { ids.append(childID) }
+                }
+                relations[relation] = ids
+            }
+            nodes.append(AXSnapshotNode(id: id, depth: item.depth, parentID: item.parentID,
+                                        availableAttributes: available, parameterizedAttributes: parameterized,
+                                        attributes: attributes, relations: relations, omittedAttributes: omitted))
+        }
+        let capturedIDs = Set(nodes.map(\.id))
+        if focusedElement == nil, let unverified = unverifiedFocusElement,
+           let index = existingIndex(unverified), capturedIDs.contains(identifier(index)) {
+            focusedElement = unverified
+            focusRead.status = "ok"
+            focusRead.note = "Focus membership was confirmed by the selected window's traversed tree; AXWindow could not establish it."
+        }
+        var focusedID = focusedElement.flatMap { existingIndex($0) }.map(identifier)
+        if let focus = focusedID, !capturedIDs.contains(focus) { focusedID = nil }
+        if let focusedID = focusedID { focusRead.value = AXSnapshotValue(type: "element_reference", text: focusedID) }
+        else if focusedElement != nil { focusRead.status = "target_focus_not_captured"; focusRead.note = "Focus belongs to the target window but its node was not captured within the budgets." }
+        let nodePositions = Dictionary(uniqueKeysWithValues: nodes.enumerated().map { ($0.element.id, $0.offset) })
+        for pending in pendingReferences {
+            guard let position = nodePositions[pending.nodeID] else { continue }
+            var ids: [String] = []
+            var values: [AXSnapshotValue] = []
+            var unresolved = 0
+            for target in pending.targets {
+                if let index = existingIndex(target), capturedIDs.contains(identifier(index)) {
+                    let id = identifier(index)
+                    ids.append(id); values.append(AXSnapshotValue(type: "element_reference", text: id))
+                } else {
+                    unresolved += 1
+                    values.append(AXSnapshotValue(type: "unresolved_element_reference", text: "not_in_captured_window_tree"))
+                }
+            }
+            nodes[position].relations[pending.attribute] = ids
+            let truncated = nodes[position].attributes[pending.attribute]?.value?.truncated
+            nodes[position].attributes[pending.attribute]?.value = AXSnapshotValue(type: "element_references", elements: values, truncated: truncated)
+            if unresolved > 0 {
+                nodes[position].attributes[pending.attribute]?.status = "partially_resolved"
+                let previous = nodes[position].attributes[pending.attribute]?.note.map { $0 + " " } ?? ""
+                nodes[position].attributes[pending.attribute]?.note = previous + "\(unresolved) of \(pending.targets.count) references were not found in captured target-window nodes; they were not followed or read."
+                note("unresolved_relation_members", nodes[position].attributes[pending.attribute]!.note!, node: pending.nodeID, attribute: pending.attribute)
+            }
+        }
+        if cursor < queue.count { limited = true; note("unvisited_nodes", "\(queue.count - cursor) queued nodes were not read before capture stopped.") }
+        let finishedAt = Date()
+        var result = AXCaptureResult(pid: pid, windowTitle: rawString(root, "AXTitle"), windowMatch: selection.1,
+                               rootNodeID: rootID, focusedNodeID: focusedID, nodes: nodes, diagnostics: diagnostics,
+                               startedAt: startedAt, finishedAt: finishedAt,
+                               durationSeconds: ProcessInfo.processInfo.systemUptime - start,
+                               completeness: limited ? "partial_budget_limited" : (readErrors ? "partial_read_errors" : "completed_requested_reads_application_exposure_unknown"),
+                               options: options, totalTextCharacters: textCount)
+        result.focusRead = focusRead
+        return result
+    }
+
+    /// Read relationship handles only. Resolution happens after traversal and never queues
+    /// referenced objects, so AXSelectedChildren/links cannot broaden capture to another window.
+    private func readReferenceRelation(_ element: AXUIElement, attribute: String, node: String) -> AXCapturedAttribute {
+        var count: CFIndex = 0
+        let countError = AXUIElementGetAttributeValueCount(element, attribute as CFString, &count)
+        var rawMembers: [AnyObject] = []
+        var truncated = false
+        var readNote: String?
+        let remaining = max(0, min(options.maxNodes, 125_000) * 8 - referenceCount)
+        let cap = min(4096, remaining)
+        if countError == .success {
+            guard count >= 0 else {
+                readErrors = true
+                note("invalid_relation_count", "Provider returned a negative relationship count.", node: node, attribute: attribute)
+                return AXCapturedAttribute(status: "invalid_value", value: nil, settable: nil, errorCode: nil, note: "Negative relationship count.")
+            }
+            let requested = min(count, cap)
+            if requested > 0 {
+                var values: CFArray?
+                let error = AXUIElementCopyAttributeValues(element, attribute as CFString, 0, requested, &values)
+                guard error == .success, let members = values as? [AnyObject] else {
+                    let status = failure(error)
+                    note("reference_read_failed", "Relationship read returned \(status.status) (AX error \(error.rawValue)).", node: node, attribute: attribute)
+                    return status
+                }
+                rawMembers = members
+            }
+            truncated = requested < count
+            readNote = "Read \(requested) of \(count) reference handles; only captured target-window members are resolved."
+        } else if countError == .attributeUnsupported || countError == .noValue {
+            return failure(countError)
+        } else {
+            // Scalar relationship attributes such as AXTitleUIElement have no array count.
+            var value: CFTypeRef?
+            let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
+            guard error == .success, let value = value else {
+                let status = failure(error)
+                note("reference_read_failed", "Relationship read returned \(status.status) (AX error \(error.rawValue)).", node: node, attribute: attribute)
+                return status
+            }
+            if CFGetTypeID(value) == AXUIElementGetTypeID() {
+                if cap > 0 { rawMembers = [value] } else { truncated = true }
+            } else if let values = value as? [AnyObject] {
+                rawMembers = Array(values.prefix(cap)); truncated = values.count > cap
+            } else {
+                readErrors = true
+                note("invalid_relation_value", "Relationship value was neither an element nor an element array.", node: node, attribute: attribute)
+                return AXCapturedAttribute(status: "unsupported_value_type", value: nil, settable: nil, errorCode: nil, note: "Expected element reference(s).")
+            }
+        }
+        referenceCount += rawMembers.count
+        let targets = rawMembers.filter { CFGetTypeID($0) == AXUIElementGetTypeID() }.map { unsafeBitCast($0, to: AXUIElement.self) }
+        if targets.count != rawMembers.count {
+            readErrors = true
+            note("invalid_relation_member", "\(rawMembers.count - targets.count) relationship members were not AX elements and could not be resolved.", node: node, attribute: attribute)
+        }
+        if truncated {
+            limited = true
+            note("reference_budget", "Relationship handles were limited to 4096 per attribute and \(min(options.maxNodes, 125_000) * 8) for the capture.", node: node, attribute: attribute)
+        }
+        pendingReferences.append((node, attribute, targets))
+        return AXCapturedAttribute(status: truncated ? "truncated" : "ok", value: AXSnapshotValue(type: "element_references", elements: [], truncated: truncated), settable: nil, errorCode: nil, note: readNote)
+    }
+
+    private func elementWithStatus(_ element: AXUIElement, _ attribute: String) -> (element: AXUIElement?, status: AXCapturedAttribute) {
+        var value: CFTypeRef?
+        let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
+        guard error == .success, let value = value else { return (nil, failure(error)) }
+        guard CFGetTypeID(value) == AXUIElementGetTypeID() else {
+            readErrors = true
+            return (nil, AXCapturedAttribute(status: "unsupported_value_type", value: nil, settable: nil, errorCode: nil, note: "Expected an AX element reference."))
+        }
+        return (unsafeBitCast(value, to: AXUIElement.self), AXCapturedAttribute(status: "ok", value: nil, settable: nil, errorCode: nil, note: nil))
+    }
+
+    private func selectWindow(app: AXUIElement, title: String?, bounds: CGRect?) throws -> (AXUIElement, String) {
+        var value: CFTypeRef?
+        let error = AXUIElementCopyAttributeValue(app, "AXWindows" as CFString, &value)
+        guard error == .success, let objects = value as? [AnyObject] else { throw AXCaptureError.windowsUnavailable(Int(error.rawValue)) }
+        let windows = objects.filter { CFGetTypeID($0) == AXUIElementGetTypeID() }.map { unsafeBitCast($0, to: AXUIElement.self) }
+        if title == nil && bounds == nil {
+            if let focused = rawElement(app, "AXFocusedWindow"), windows.contains(where: { CFEqual($0, focused) }) { return (focused, "focused_window") }
+            if windows.count == 1 { return (windows[0], "single_window") }
+            throw AXCaptureError.ambiguousWindow(windows.count)
+        }
+        let titleMatches = windows.filter { title == nil || rawString($0, "AXTitle") == title }
+        let matches = titleMatches.filter { window in
+            guard let expected = bounds else { return true }
+            guard let actual = rawBounds(window) else { return false }
+            return abs(actual.minX - expected.minX) <= 3 && abs(actual.minY - expected.minY) <= 3 && abs(actual.width - expected.width) <= 3 && abs(actual.height - expected.height) <= 3
+        }
+        if matches.count == 1 { return (matches[0], bounds == nil ? "exact_title" : (title == nil ? "bounds_within_3_points" : "exact_title_and_bounds_within_3_points")) }
+        if matches.count > 1 { throw AXCaptureError.ambiguousWindow(matches.count) }
+        throw AXCaptureError.windowNotFound("requested title=\(title ?? "(any)"), bounds=\(String(describing: bounds)); exposed titles=\(windows.compactMap { rawString($0, "AXTitle") }.joined(separator: "; "))")
+    }
+
+    private func readParameterizedText(_ element: AXUIElement, names: [String], node: String,
+                                       attributes: inout [String: AXCapturedAttribute]) {
+        guard budgetAvailable(), textCount < options.maxTotalTextCharacters else { return }
+        // AX providers advertise these names. Opaque text markers are only passed back to
+        // the same provider; no private text-marker symbols or injected code are used.
+        if names.contains("AXTextMarkerRangeForUIElement") && names.contains("AXAttributedStringForTextMarkerRange") {
+            var marker: CFTypeRef?
+            let rangeError = AXUIElementCopyParameterizedAttributeValue(element, "AXTextMarkerRangeForUIElement" as CFString, element, &marker)
+            if rangeError == .success, let marker = marker, budgetAvailable() {
+                var text: CFTypeRef?
+                let error = AXUIElementCopyParameterizedAttributeValue(element, "AXAttributedStringForTextMarkerRange" as CFString, marker, &text)
+                attributes["AXAttributedStringForTextMarkerRange"] = error == .success && text != nil ? captured(text!, node: node, attribute: "AXAttributedStringForTextMarkerRange") : failure(error)
+            } else {
+                attributes["AXTextMarkerRangeForUIElement"] = failure(rangeError)
+            }
+        }
+        guard names.contains("AXAttributedStringForRange"), budgetAvailable(), textCount < options.maxTotalTextCharacters,
+              let count = attributes["AXNumberOfCharacters"]?.value?.number, count > 0, count.isFinite else { return }
+        let maxCount = min(count, Double(options.maxTextCharacters), Double(options.maxTotalTextCharacters - textCount), Double(Int.max / 2))
+        var range = CFRange(location: 0, length: Int(maxCount))
+        guard let parameter = AXValueCreate(.cfRange, &range) else { return }
+        var value: CFTypeRef?
+        let error = AXUIElementCopyParameterizedAttributeValue(element, "AXAttributedStringForRange" as CFString, parameter, &value)
+        let key = "AXAttributedStringForRange"
+        attributes[key] = error == .success && value != nil ? captured(value!, node: node, attribute: key) : failure(error)
+        attributes[key]?.note = "Requested UTF-16 range 0..<\(range.length) of AXNumberOfCharacters=\(count)."
+        if maxCount < count { limited = true; note("parameterized_text_range_limited", "Requested \(range.length) of \(count) UTF-16 units because of text budget.", node: node, attribute: key) }
+    }
+
+    private func captured(_ raw: CFTypeRef, node: String, attribute: String) -> AXCapturedAttribute {
+        if CFGetTypeID(raw) == AXValueGetTypeID() {
+            let value = unsafeBitCast(raw, to: AXValue.self)
+            if AXValueGetType(value) == .axError {
+                var error = AXError.success
+                if AXValueGetValue(value, .axError, &error) { return failure(error) }
+            }
+        }
+        let value = serializeValue(raw, node: node, attribute: attribute)
+        let unsupported = value.type == "unsupported" || value.type == "unsupported_ax_value"
+        if unsupported { readErrors = true; note("unsupported_value_type", value.text ?? value.type, node: node, attribute: attribute) }
+        let status = unsupported ? "unsupported_value_type" : (value.type == "invalid" ? "invalid_value" : "ok")
+        return AXCapturedAttribute(status: status, value: value, settable: nil, errorCode: nil, note: nil)
+    }
+
+    /// Internal serializer is independently testable without a running application or AX permission.
+    func serializeValue(_ raw: CFTypeRef, node: String, attribute: String, nesting: Int = 0) -> AXSnapshotValue {
+        guard nesting < 8 else { limited = true; note("attribute_nesting_limit", "Nested attribute exceeded 8 levels.", node: node, attribute: attribute); return AXSnapshotValue(type: "omitted_nested_value") }
+        if let rich = raw as? NSAttributedString {
+            var output = boundedText(rich.string, type: "attributed_text", node: node, attribute: attribute)
+            let keptLength = (output.text ?? "").utf16.count
+            var runs: [AXTextRun] = []
+            var runsWereTruncated = false
+            if keptLength > 0 {
+                rich.enumerateAttributes(in: NSRange(location: 0, length: min(keptLength, rich.length)), options: []) { attributes, range, stop in
+                    guard runs.count < 10_000 else { runsWereTruncated = true; stop.pointee = true; return }
+                    var strings: [String: String] = [:]
+                    if attributes.count > 128 { self.limited = true; self.note("rich_text_attribute_count_limit", "Retained at most 128 metadata fields for a rich-text run.", node: node, attribute: attribute) }
+                    for key in attributes.keys.sorted(by: { $0.rawValue < $1.rawValue }).prefix(128) {
+                        guard let value = attributes[key] else { continue }
+                        let metadata: String
+                        if let font = value as? NSFont { metadata = "\(font.fontName), \(font.pointSize)pt" }
+                        else if let url = value as? URL { metadata = url.absoluteString }
+                        else if let text = value as? String { metadata = text }
+                        else if let number = value as? NSNumber { metadata = number.stringValue }
+                        else if let color = value as? NSColor, let rgb = color.usingColorSpace(.sRGB) { metadata = "rgba(\(rgb.redComponent),\(rgb.greenComponent),\(rgb.blueComponent),\(rgb.alphaComponent))" }
+                        else { metadata = "[unsupported run attribute: \(String(describing: type(of: value)))]" }
+                        if metadata.count > 4096 { self.limited = true; self.note("rich_text_metadata_length_limit", "Run metadata \(key.rawValue) was limited to 4096 characters from \(metadata.count).", node: node, attribute: attribute) }
+                        strings[key.rawValue] = self.boundedText(String(metadata.prefix(4096)), type: "string", node: node, attribute: "\(attribute).runs.\(key.rawValue)").text ?? ""
+                    }
+                    runs.append(AXTextRun(location: range.location, length: range.length, attributes: strings))
+                }
+                if runsWereTruncated { limited = true; note("rich_text_run_limit", "Retained at most 10000 attributed-text runs.", node: node, attribute: attribute) }
+            }
+            output.runs = runs
+            return output
+        }
+        let typeID = CFGetTypeID(raw)
+        if typeID == CFBooleanGetTypeID() { return AXSnapshotValue(type: "boolean", boolean: (raw as? NSNumber)?.boolValue) }
+        if let url = raw as? URL { return boundedText(url.absoluteString, type: "url", node: node, attribute: attribute) }
+        if let text = raw as? String { return boundedText(text, type: "string", node: node, attribute: attribute) }
+        if let number = raw as? NSNumber {
+            let n = number.doubleValue
+            guard n.isFinite else { return AXSnapshotValue(type: "nonfinite_number", text: number.stringValue) }
+            let floating = CFNumberIsFloatType(unsafeBitCast(number, to: CFNumber.self))
+            // Exact integer text prevents loss of integers larger than Double's precision.
+            return AXSnapshotValue(type: floating ? "float" : "integer", text: floating ? nil : number.stringValue, number: n)
+        }
+        if typeID == AXValueGetTypeID() {
+            let value = unsafeBitCast(raw, to: AXValue.self)
+            switch AXValueGetType(value) {
+            case .cgPoint:
+                var point = CGPoint.zero
+                guard AXValueGetValue(value, .cgPoint, &point) else { return invalidValue("Cannot decode AX point.", node: node, attribute: attribute) }
+                return geometry(type: "point", components: ["x": point.x, "y": point.y], node: node, attribute: attribute)
+            case .cgSize:
+                var size = CGSize.zero
+                guard AXValueGetValue(value, .cgSize, &size) else { return invalidValue("Cannot decode AX size.", node: node, attribute: attribute) }
+                return geometry(type: "size", components: ["width": size.width, "height": size.height], node: node, attribute: attribute)
+            case .cgRect:
+                var rect = CGRect.zero
+                guard AXValueGetValue(value, .cgRect, &rect) else { return invalidValue("Cannot decode AX rect.", node: node, attribute: attribute) }
+                return geometry(type: "rect", components: ["x": rect.origin.x, "y": rect.origin.y, "width": rect.width, "height": rect.height], node: node, attribute: attribute)
+            case .cfRange:
+                var range = CFRange()
+                guard AXValueGetValue(value, .cfRange, &range) else { return invalidValue("Cannot decode AX range.", node: node, attribute: attribute) }
+                return AXSnapshotValue(type: "range", components: ["location": Double(range.location), "length": Double(range.length)])
+            default: return AXSnapshotValue(type: "unsupported_ax_value", text: "AXValue type \(AXValueGetType(value).rawValue)")
+            }
+        }
+        if typeID == AXUIElementGetTypeID() {
+            let element = unsafeBitCast(raw, to: AXUIElement.self)
+            return AXSnapshotValue(type: "element_reference", text: existingIndex(element).map(identifier) ?? "outside_collected_tree")
+        }
+        if let array = raw as? [AnyObject] {
+            let cap = min(array.count, 4096)
+            if cap < array.count { limited = true; note("attribute_array_limit", "Retained \(cap) of \(array.count) attribute entries.", node: node, attribute: attribute) }
+            return AXSnapshotValue(type: "array", elements: array.prefix(cap).map { serializeValue($0, node: node, attribute: attribute, nesting: nesting + 1) }, truncated: cap < array.count)
+        }
+        return AXSnapshotValue(type: "unsupported", text: "CFTypeID=\(typeID); Swift type=\(String(describing: type(of: raw)))")
+    }
+
+    private func geometry(type: String, components: [String: Double], node: String, attribute: String) -> AXSnapshotValue {
+        guard components.values.allSatisfy(\.isFinite) else { return invalidValue("AX \(type) contains non-finite coordinates: \(components).", node: node, attribute: attribute) }
+        return AXSnapshotValue(type: type, components: components)
+    }
+    private func invalidValue(_ reason: String, node: String, attribute: String) -> AXSnapshotValue {
+        readErrors = true; note("invalid_attribute_value", reason, node: node, attribute: attribute)
+        return AXSnapshotValue(type: "invalid", text: reason)
+    }
+
+    private func boundedText(_ text: String, type: String, node: String, attribute: String) -> AXSnapshotValue {
+        let original = text.count
+        let allowed = min(original, options.maxTextCharacters, max(0, options.maxTotalTextCharacters - textCount))
+        textCount += allowed
+        let truncated = allowed < original
+        if truncated { limited = true; note("text_budget", "Retained \(allowed) of \(original) characters; per-attribute or total text budget reached.", node: node, attribute: attribute) }
+        return AXSnapshotValue(type: type, text: truncated ? String(text.prefix(allowed)) : text,
+                               originalCharacterCount: original, truncated: truncated)
+    }
+
+    private func failure(_ error: AXError) -> AXCapturedAttribute {
+        let status: String
+        switch error {
+        case .noValue: status = "no_value"
+        case .attributeUnsupported, .parameterizedAttributeUnsupported, .notImplemented: status = "unsupported"
+        case .cannotComplete: status = "cannot_complete"
+        case .invalidUIElement: status = "invalid_element"
+        case .apiDisabled: status = "api_disabled"
+        case .success: status = "empty_result"
+        default: status = "read_error"
+        }
+        if status != "no_value" && status != "unsupported" && status != "empty_result" { readErrors = true }
+        return AXCapturedAttribute(status: status, value: nil, settable: nil, errorCode: Int(error.rawValue), note: nil)
+    }
+
+    private func register(_ element: AXUIElement, depth: Int, parentID: String?) -> String? {
+        if let index = existingIndex(element) { return identifier(index) }
+        guard depth <= options.maxDepth else { limited = true; note("depth_limit", "A child exceeded depth \(options.maxDepth).", node: parentID); return nil }
+        guard elements.count < options.maxNodes else {
+            limited = true
+            if !nodeLimitReported { nodeLimitReported = true; note("node_limit", "Reached the \(options.maxNodes)-node capture budget; additional elements were omitted.", node: parentID) }
+            return nil
+        }
+        let index = elements.count
+        elements.append(element); buckets[CFHash(element), default: []].append(index)
+        queue.append((index, depth, parentID))
+        return identifier(index)
+    }
+    private func existingIndex(_ element: AXUIElement) -> Int? {
+        (buckets[CFHash(element)] ?? []).first { CFEqual(elements[$0], element) }
+    }
+    private func identifier(_ index: Int) -> String { "n\(index + 1)" }
+    private func budgetAvailable() -> Bool {
+        if ProcessInfo.processInfo.systemUptime < deadline { return true }
+        limited = true
+        if !deadlineReported { note("capture_deadline", "AX capture exceeded its \(options.timeoutSeconds)-second work budget; an in-flight AX call can finish after this deadline."); deadlineReported = true }
+        return false
+    }
+    private func note(_ code: String, _ message: String, node: String? = nil, attribute: String? = nil) {
+        // Prevent diagnostics from becoming an unbounded secondary payload.
+        if diagnostics.count < 10_000 { diagnostics.append(AXCaptureDiagnostic(code: code, message: message, nodeID: node, attribute: attribute)) }
+        else if diagnostics.count == 10_000 { diagnostics.append(AXCaptureDiagnostic(code: "diagnostics_limit", message: "Further diagnostics omitted after 10000 entries.", nodeID: nil, attribute: nil)); limited = true }
+    }
+    private func rawElement(_ element: AXUIElement, _ attribute: String) -> AXUIElement? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
+              let value = value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        return unsafeBitCast(value, to: AXUIElement.self)
+    }
+    private func rawString(_ element: AXUIElement, _ attribute: String) -> String? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else { return nil }
+        return value as? String
+    }
+    private func rawBounds(_ element: AXUIElement) -> CGRect? {
+        var p: CFTypeRef?, s: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, "AXPosition" as CFString, &p) == .success,
+              AXUIElementCopyAttributeValue(element, "AXSize" as CFString, &s) == .success,
+              let p = p, let s = s, CFGetTypeID(p) == AXValueGetTypeID(), CFGetTypeID(s) == AXValueGetTypeID() else { return nil }
+        var point = CGPoint.zero, size = CGSize.zero
+        guard AXValueGetValue(unsafeBitCast(p, to: AXValue.self), .cgPoint, &point),
+              AXValueGetValue(unsafeBitCast(s, to: AXValue.self), .cgSize, &size) else { return nil }
+        return CGRect(origin: point, size: size)
+    }
+}

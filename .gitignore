@@ -4,3 +4,5 @@
 Captures/
 LocalEvidence/
 Ref/
+__pycache__/
+*.pyc
