@@ -10,8 +10,8 @@ struct Arguments {
 
     init(_ raw: [String]) throws {
         command = raw.first ?? "help"
-        let booleanOptions: Set<String> = ["--ocr", "--no-image", "--help"]
-        let valueOptions: Set<String> = ["--app", "--window-id", "--output", "--capture", "--image", "--timeout", "--max-nodes", "--max-depth", "--max-text-characters"]
+        let booleanOptions: Set<String> = ["--ocr", "--no-image", "--help", "--enable-electron-ax"]
+        let valueOptions: Set<String> = ["--app", "--window-id", "--output", "--capture", "--image", "--timeout", "--max-nodes", "--max-depth", "--max-text-characters", "--completion-file", "--working-directory"]
         var index = 1
         while index < raw.count {
             let key = raw[index]
@@ -49,17 +49,30 @@ struct CLIError: LocalizedError {
 @main
 struct OneShotCLI {
     static func main() async {
+        let startedAt = Date()
+        let raw = Array(CommandLine.arguments.dropFirst())
+        // Resolve the runner's receipt before argument validation, so malformed commands
+        // also finish explicitly. The runner always passes an absolute, new destination.
+        var completionURL: URL?
+        var exitCode: Int32 = 0
+        var failureMessage: String?
         do {
-            let args = try Arguments(Array(CommandLine.arguments.dropFirst()))
-            if args.flags.contains("--help") { print(help); return }
-            switch args.command {
+            completionURL = try CommandCompletion.requestedURL(in: raw)
+            let args = try Arguments(raw)
+            if let directory = args.values["--working-directory"], !FileManager.default.changeCurrentDirectoryPath(directory) {
+                throw CLIError("Cannot use working directory: \(directory)")
+            }
+            switch args.flags.contains("--help") ? "help" : args.command {
             case "help", "--help", "-h": print(help)
             case "doctor": try doctor()
             case "authorize": await authorize()
             case "windows":
                 let app = try args.required("--app")
                 try printJSON(WindowSelection.candidates(from: WindowCapture.listWindows(), app: app))
-            case "capture": try await capture(args)
+            case "diagnose":
+                let window = try selectedWindow(args)
+                try printJSON(AXCollector().inspectApplication(pid: window.pid))
+            case "capture": exitCode = try await capture(args)
             case "read":
                 let directory = URL(fileURLWithPath: try args.required("--capture"), isDirectory: true)
                 print(try SnapshotStore.readContext(from: directory))
@@ -73,9 +86,20 @@ struct OneShotCLI {
             default: throw CLIError("Unknown command '\(args.command)'. Run oneshot help.")
             }
         } catch {
+            exitCode = 1
+            failureMessage = error.localizedDescription
             FileHandle.standardError.write(Data("oneshot: \(error.localizedDescription)\n".utf8))
-            exit(1)
         }
+        fflush(nil)
+        if let completionURL {
+            do {
+                try CommandCompletion.write(exitCode: exitCode, command: raw.first ?? "help", startedAt: startedAt, error: failureMessage, to: completionURL)
+            } catch {
+                FileHandle.standardError.write(Data("oneshot: Cannot publish completion receipt: \(error.localizedDescription)\n".utf8))
+                exitCode = 1
+            }
+        }
+        exit(exitCode)
     }
 
     static func doctor() throws {
@@ -108,14 +132,19 @@ struct OneShotCLI {
         }
     }
 
-    static func capture(_ args: Arguments) async throws {
+    static func selectedWindow(_ args: Arguments) throws -> CaptureWindow {
         let app = try args.required("--app")
         let windowID: UInt32?
         if let raw = args.values["--window-id"] {
             guard let parsed = UInt32(raw) else { throw CLIError("--window-id must be an unsigned integer") }
             windowID = parsed
         } else { windowID = nil }
-        let window = try WindowSelection.select(from: WindowCapture.listWindows(), app: app, windowID: windowID)
+        return try WindowSelection.select(from: WindowCapture.listWindows(), app: app, windowID: windowID)
+    }
+
+    static func capture(_ args: Arguments) async throws -> Int32 {
+        let app = try args.required("--app")
+        var window = try selectedWindow(args)
         let timeout: Double
         if let raw = args.values["--timeout"] {
             guard let parsed = Double(raw), parsed.isFinite, parsed > 0, parsed <= 300 else {
@@ -132,6 +161,15 @@ struct OneShotCLI {
         let id = UUID().uuidString
         let start = Date()
         let store = try newStore(args, id: id)
+        var accessibilityPreparation: ComponentOutcome?
+        if args.flags.contains("--enable-electron-ax") {
+            let preparation = ElectronAccessibility.enable(pid: window.pid)
+            try store.write(preparation, named: "accessibility-preparation.json")
+            accessibilityPreparation = ComponentOutcome(status: preparation.status, file: "accessibility-preparation.json")
+            // The opt-in request can change the application's accessibility presentation.
+            // Refresh this same explicit window's metadata before taking the snapshot.
+            window = try WindowSelection.select(from: WindowCapture.listWindows(), app: app, windowID: window.id)
+        }
         var screenshot = ComponentOutcome(status: "not_requested")
         var accessibility = ComponentOutcome(status: "not_attempted")
         var ocr = ComponentOutcome(status: "not_requested")
@@ -152,6 +190,9 @@ struct OneShotCLI {
             context += "[Accessibility — frozen capture]\n" + result.readableText + "\n"
             accessibility = ComponentOutcome(status: result.completeness, file: "accessibility.json")
         } catch {
+            if let diagnostic = (error as? AXCaptureError)?.applicationDiagnostic {
+                try store.write(diagnostic, named: "accessibility-diagnostic.json")
+            }
             accessibility = ComponentOutcome(status: "failed", error: error.localizedDescription)
             context += "[Accessibility failed]\n\(error.localizedDescription)\n"
         }
@@ -177,16 +218,18 @@ struct OneShotCLI {
             consistency: identityStable ? "window_identity_stable_content_not_atomic" : "window_changed_or_disappeared",
             notes: [
                 "Screenshot and AX are independent reads with their own timestamps; unchanged window identity does not prove atomic or unchanged content.",
-                "No clicks, scrolling, focus changes, or application setting changes were performed.",
+                args.flags.contains("--enable-electron-ax")
+                    ? "Explicit Electron accessibility preparation was requested before capture; see accessibility-preparation.json. No clicks, scrolling, or focus changes were performed."
+                    : "No clicks, scrolling, focus changes, or application setting changes were performed.",
                 "AX collection preserves exposed off-screen content; a completed traversal does not prove the app exposed its whole document.",
                 "Read captured files offline; this snapshot is never refreshed in place."
-            ]
+            ], accessibilityPreparation: accessibilityPreparation
         )
         try store.writeText(context, named: "context.txt")
         try store.write(manifest, named: "manifest.json")
         print("Capture saved: \(store.directory.path)")
         try printJSON(manifest)
-        if accessibility.status == "failed" && screenshot.status != "captured" { exit(2) }
+        return accessibility.status == "failed" && screenshot.status != "captured" ? 2 : 0
     }
 
     static func newStore(_ args: Arguments, id: String) throws -> SnapshotStore {
@@ -204,17 +247,20 @@ struct OneShotCLI {
     oneshot doctor
     oneshot authorize   (explicitly opens standard macOS consent; approval remains manual)
     oneshot windows --app <exact bundle identifier or app name>
+    oneshot diagnose --app <app> [--window-id <id>]   (read-only AX window diagnostics)
     oneshot capture --app <bundle identifier or app name> [--window-id <id>]
                     [--output <NEW directory>] [--ocr] [--no-image]
                     [--timeout <seconds>] [--max-nodes <count>] [--max-depth <count>]
                     [--max-text-characters <count>]
+                    [--enable-electron-ax] (explicit runtime AXManualAccessibility request)
     oneshot read --capture <existing capture directory>
     oneshot ocr --image <existing image> [--output <NEW directory>]
 
     A capture saves manifest.json, accessibility.json, context.txt and, when available,
     screenshot.png/screenshot.json and ocr.json. Failures are explicit in the manifest.
     Window selection is explicit and ambiguous matches are rejected. This probe never
-    changes focus, scrolls, or enables Electron accessibility. Only 'authorize' requests
+    changes focus or scrolls. Electron accessibility is passive unless explicitly enabled
+    with --enable-electron-ax; that request and its result are saved. Only 'authorize' requests
     OS permissions; capture and doctor never display consent prompts.
     A successful capture directory is immutable to the CLI. 'read' is entirely offline.
     """

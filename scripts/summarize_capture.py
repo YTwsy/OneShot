@@ -20,10 +20,13 @@ def summarize(directory):
     nodes = ax.get("nodes", [])
     node_ids = {node["id"] for node in nodes}
     unresolved = set()
+    read_errors = collections.Counter()
     for node in nodes:
         attrs = node.get("attributes", {})
         roles[attrs.get("AXRole", {}).get("value", {}).get("text", "unknown")] += 1
         for name, attribute in attrs.items():
+            if attribute.get("status") in ("read_error", "cannot_complete"):
+                read_errors[(name, attribute.get("errorCode"))] += 1
             value = attribute.get("value") or {}
             types[value.get("type", attribute.get("status", "unknown"))] += 1
             text = value.get("text")
@@ -36,6 +39,10 @@ def summarize(directory):
                     sources[name] += 1
         for targets in node.get("relations", {}).values():
             unresolved.update(target for target in targets if target not in node_ids)
+    screenshot_path = directory / "screenshot.json"
+    screenshot = json.loads(screenshot_path.read_text()) if screenshot_path.exists() else {}
+    ocr_path = directory / "ocr.json"
+    ocr = json.loads(ocr_path.read_text()) if ocr_path.exists() else {}
     return {
         "captureID": manifest["captureID"],
         "application": manifest["requestedApp"],
@@ -44,6 +51,10 @@ def summarize(directory):
         "consistency": manifest["consistency"],
         "axNodes": len(nodes),
         "axCompleteness": ax.get("completeness", "unavailable"),
+        "axDurationSeconds": ax.get("durationSeconds"),
+        "screenshotPixels": {key: screenshot.get(key) for key in ("pixelWidth", "pixelHeight")},
+        "ocrObservations": len(ocr.get("observations", [])),
+        "focusRead": ax.get("focusRead"),
         "focusedNodeID": ax.get("focusedNodeID"),
         "roleCounts": dict(roles),
         "valueTypeCounts": dict(types),
@@ -53,6 +64,8 @@ def summarize(directory):
         "uniqueTextCharacters": sum(map(len, unique_text)),
         "unvisitedReferencedNodes": sorted(unresolved),
         "diagnosticCounts": dict(collections.Counter(d["code"] for d in ax.get("diagnostics", []))),
+        "attributeReadErrors": [{"attribute": key[0], "errorCode": key[1], "count": count}
+                                for key, count in sorted(read_errors.items())],
         "note": "Only describes stored evidence. Text size, node count and completed reads do not prove whole-document completeness.",
     }
 

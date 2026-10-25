@@ -62,6 +62,7 @@ public struct SnapshotManifest: Codable {
     public let window: CaptureWindow
     public let windowAfter: CaptureWindow?
     public let accessibility: ComponentOutcome
+    public let accessibilityPreparation: ComponentOutcome?
     public let screenshot: ComponentOutcome
     public let ocr: ComponentOutcome
     public let consistency: String
@@ -70,11 +71,12 @@ public struct SnapshotManifest: Codable {
     public init(captureID: String, startedAt: Date, finishedAt: Date, requestedApp: String,
                 applicationVersion: String?, window: CaptureWindow, windowAfter: CaptureWindow?,
                 accessibility: ComponentOutcome, screenshot: ComponentOutcome, ocr: ComponentOutcome,
-                consistency: String, notes: [String]) {
+                consistency: String, notes: [String], accessibilityPreparation: ComponentOutcome? = nil) {
         schemaVersion = 1
         self.captureID = captureID; self.startedAt = startedAt; self.finishedAt = finishedAt
         self.requestedApp = requestedApp; self.applicationVersion = applicationVersion
         self.window = window; self.windowAfter = windowAfter; self.accessibility = accessibility
+        self.accessibilityPreparation = accessibilityPreparation
         self.screenshot = screenshot; self.ocr = ocr; self.consistency = consistency; self.notes = notes
     }
 }

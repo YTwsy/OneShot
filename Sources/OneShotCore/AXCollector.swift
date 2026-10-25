@@ -68,6 +68,50 @@ public struct AXSnapshotNode: Codable {
     public var omittedAttributes: [String: String]
 }
 
+public struct AXWindowDiagnostic: Codable {
+    public var index: Int
+    public var title: AXCapturedAttribute
+    public var position: AXCapturedAttribute
+    public var size: AXCapturedAttribute
+    public var bounds: CGRect?
+}
+
+public struct AXApplicationFeatureProbe: Codable {
+    /// nil means AXCopyAttributeNames failed, so declaration status is unknown.
+    public var declared: Bool?
+    public var value: AXCapturedAttribute
+    public var settable: AXCapturedAttribute
+}
+
+public struct AXApplicationDiagnosticResult: Codable {
+    public var pid: Int32
+    public var observedAt: Date
+    public var accessibilityTrusted: Bool
+    public var attributeNamesRead: AXCapturedAttribute
+    public var availableAttributes: [String]
+    public var windowsRead: AXCapturedAttribute
+    public var windowEntryCount: Int?
+    public var validWindowCount: Int
+    public var candidates: [AXWindowDiagnostic]
+    public var accessibilityFeatures: [String: AXApplicationFeatureProbe]
+    public var inspectionAttempts: Int = 1
+    public var retryHistory: [String]? = nil
+
+    /// Suitable for error logs: retain matching evidence without reproducing window titles.
+    public var summary: String {
+        let candidateSummary = candidates.map { candidate in
+            "#\(candidate.index){title=\(candidate.title.status),titleCharacters=\(candidate.title.value?.text?.count ?? 0),position=\(candidate.position.status),size=\(candidate.size.status),bounds=\(String(describing: candidate.bounds))}"
+        }.joined(separator: "; ")
+        let featureSummary = accessibilityFeatures.keys.sorted().map { key -> String in
+            let probe = accessibilityFeatures[key]!
+            let declared = probe.declared.map(String.init) ?? "unknown"
+            let value = probe.value.value?.boolean.map(String.init) ?? probe.value.value.map { "type:\($0.type)" } ?? probe.value.status
+            return "\(key){declared=\(declared),value=\(value),settable=\(probe.settable.value?.boolean.map(String.init) ?? probe.settable.status)}"
+        }.joined(separator: "; ")
+        return "inspectionAttempts=\(inspectionAttempts); AXWindows status=\(windowsRead.status),error=\(windowsRead.errorCode.map(String.init) ?? "none"),entries=\(windowEntryCount.map(String.init) ?? "unknown"),validCandidates=\(validWindowCount); candidates=[\(candidateSummary)]; features=[\(featureSummary)]"
+    }
+}
+
 public struct AXCaptureResult: Codable {
     public var pid: Int32
     public var windowTitle: String?
@@ -126,6 +170,11 @@ public enum AXCaptureError: LocalizedError {
     case windowsUnavailable(Int)
     case windowNotFound(String)
     case ambiguousWindow(Int)
+    case windowInspectionFailed(String, AXApplicationDiagnosticResult)
+    public var applicationDiagnostic: AXApplicationDiagnosticResult? {
+        if case .windowInspectionFailed(_, let diagnostic) = self { return diagnostic }
+        return nil
+    }
     public var errorDescription: String? {
         switch self {
         case .permissionDenied: return "Accessibility permission is not granted to this capture process. No permission prompt or setting change was attempted."
@@ -133,6 +182,7 @@ public enum AXCaptureError: LocalizedError {
         case .windowsUnavailable(let code): return "Cannot read application AXWindows (AX error \(code))."
         case .windowNotFound(let details): return "Cannot match the requested screenshot window to an AX window: \(details)"
         case .ambiguousWindow(let count): return "\(count) AX windows match the request; refusing to choose an arbitrary window."
+        case .windowInspectionFailed(let reason, let diagnostic): return "\(reason) \(diagnostic.summary)"
         }
     }
 }
@@ -141,14 +191,14 @@ public enum AXCaptureError: LocalizedError {
 /// A declared parameterized text API can be used without importing private frameworks.
 public final class AXCollector {
     public let options: AXCaptureOptions
-    private var diagnostics: [AXCaptureDiagnostic] = []
+    private(set) var diagnostics: [AXCaptureDiagnostic] = []
     private var elements: [AXUIElement] = []
     private var buckets: [CFHashCode: [Int]] = [:]
     private var queue: [(index: Int, depth: Int, parentID: String?)] = []
     private var deadline: TimeInterval = 0
     private var textCount = 0
     private var limited = false
-    private var readErrors = false
+    private(set) var readErrors = false
     private var deadlineReported = false
     private var nodeLimitReported = false
     private var pendingReferences: [(nodeID: String, attribute: String, targets: [AXUIElement])] = []
@@ -158,9 +208,20 @@ public final class AXCollector {
     private let nonTraversedRelations: Set<String> = ["AXParent", "AXWindow", "AXTopLevelUIElement", "AXServesAsTitleForUIElements", "AXSharedTextUIElements", "AXVisibleChildren", "AXVisibleRows", "AXVisibleColumns", "AXFocusedUIElement"]
     private let fallbackAttributes = ["AXRole", "AXSubrole", "AXRoleDescription", "AXTitle", "AXDescription", "AXHelp", "AXValue", "AXURL", "AXDocument", "AXIdentifier", "AXEnabled", "AXSelected", "AXExpanded", "AXFocused", "AXPosition", "AXSize", "AXSelectedText", "AXSelectedTextRange", "AXNumberOfCharacters"]
     private let secureMetadataAttributes: Set<String> = ["AXRole", "AXSubrole", "AXRoleDescription", "AXTitle", "AXDescription", "AXHelp", "AXIdentifier", "AXEnabled", "AXFocused", "AXPosition", "AXSize", "AXRequired", "AXInvalid"]
+    private let nonserializableTextMarkerAttributes: Set<String> = ["AXStartTextMarker", "AXEndTextMarker", "AXSelectedTextMarkerRange"]
 
     public init(options: AXCaptureOptions = AXCaptureOptions()) { self.options = options }
     public static var isAccessibilityTrusted: Bool { AXIsProcessTrusted() }
+
+    /// Passive diagnostics. It does not enable AXManualAccessibility/AXEnhancedUserInterface,
+    /// request permission, traverse windows, or read editor/page contents.
+    public func inspectApplication(pid: pid_t) -> AXApplicationDiagnosticResult {
+        let reader = AXCollector(options: options)
+        reader.deadline = ProcessInfo.processInfo.systemUptime + (options.timeoutSeconds.isFinite && options.timeoutSeconds > 0 ? options.timeoutSeconds : 5)
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.25)
+        return reader.applicationInspection(app: app, pid: pid).result
+    }
 
     public func capture(pid: pid_t, windowTitle: String?, windowBounds: CGRect?) throws -> AXCaptureResult {
         guard Self.isAccessibilityTrusted else { throw AXCaptureError.permissionDenied }
@@ -436,25 +497,143 @@ public final class AXCollector {
         return (unsafeBitCast(value, to: AXUIElement.self), AXCapturedAttribute(status: "ok", value: nil, settable: nil, errorCode: nil, note: nil))
     }
 
-    private func selectWindow(app: AXUIElement, title: String?, bounds: CGRect?) throws -> (AXUIElement, String) {
-        var value: CFTypeRef?
-        let error = AXUIElementCopyAttributeValue(app, "AXWindows" as CFString, &value)
-        guard error == .success, let objects = value as? [AnyObject] else { throw AXCaptureError.windowsUnavailable(Int(error.rawValue)) }
-        let windows = objects.filter { CFGetTypeID($0) == AXUIElementGetTypeID() }.map { unsafeBitCast($0, to: AXUIElement.self) }
-        if title == nil && bounds == nil {
-            if let focused = rawElement(app, "AXFocusedWindow"), windows.contains(where: { CFEqual($0, focused) }) { return (focused, "focused_window") }
-            if windows.count == 1 { return (windows[0], "single_window") }
-            throw AXCaptureError.ambiguousWindow(windows.count)
+    private func applicationInspection(app: AXUIElement, pid: pid_t) -> (result: AXApplicationDiagnosticResult, windows: [(AXUIElement, AXWindowDiagnostic)]) {
+        guard budgetAvailable() else {
+            let skipped = AXCapturedAttribute(status: "capture_deadline", value: nil, settable: nil, errorCode: nil, note: "Read was not started after the original capture/inspection deadline.")
+            let result = AXApplicationDiagnosticResult(pid: pid, observedAt: Date(), accessibilityTrusted: Self.isAccessibilityTrusted,
+                attributeNamesRead: skipped, availableAttributes: [], windowsRead: skipped, windowEntryCount: nil,
+                validWindowCount: 0, candidates: [], accessibilityFeatures: [:])
+            return (result, [])
         }
-        let titleMatches = windows.filter { title == nil || rawString($0, "AXTitle") == title }
+        var namesRef: CFArray?
+        let namesError = AXUIElementCopyAttributeNames(app, &namesRef)
+        let names = (namesRef as? [String]) ?? []
+        let namesRead: AXCapturedAttribute
+        if namesError == .success, namesRef != nil {
+            namesRead = AXCapturedAttribute(status: "ok", value: AXSnapshotValue(type: "attribute_name_count", number: Double(names.count)), settable: nil, errorCode: 0, note: nil)
+        } else { namesRead = failure(namesError) }
+        var features: [String: AXApplicationFeatureProbe] = [:]
+        for name in ["AXManualAccessibility", "AXEnhancedUserInterface"] {
+            guard namesError == .success, namesRef != nil else {
+                let skipped = AXCapturedAttribute(status: "not_probed_declaration_unknown", value: nil, settable: nil, errorCode: Int(namesError.rawValue), note: "AXCopyAttributeNames did not establish whether this attribute is declared.")
+                features[name] = AXApplicationFeatureProbe(declared: nil, value: skipped, settable: skipped)
+                continue
+            }
+            guard names.contains(name) else {
+                let skipped = AXCapturedAttribute(status: "not_declared", value: nil, settable: nil, errorCode: nil, note: "Attribute was absent from the provider's declared attributes; no value/settable probe was attempted.")
+                features[name] = AXApplicationFeatureProbe(declared: false, value: skipped, settable: skipped)
+                continue
+            }
+            let value = diagnosticAttribute(app, attribute: name)
+            guard budgetAvailable() else {
+                features[name] = AXApplicationFeatureProbe(declared: true, value: value,
+                    settable: AXCapturedAttribute(status: "capture_deadline", value: nil, settable: nil, errorCode: nil, note: "Settable probe not started after deadline."))
+                continue
+            }
+            var isSettable = DarwinBoolean(false)
+            let settableError = AXUIElementIsAttributeSettable(app, name as CFString, &isSettable)
+            let settable = settableError == .success
+                ? AXCapturedAttribute(status: "ok", value: AXSnapshotValue(type: "boolean", boolean: isSettable.boolValue), settable: nil, errorCode: 0, note: "Read-only capability probe; no AX value was set.")
+                : failure(settableError)
+            features[name] = AXApplicationFeatureProbe(declared: true, value: value, settable: settable)
+        }
+        var value: CFTypeRef?
+        let mayReadWindows = budgetAvailable()
+        let windowsError = mayReadWindows ? AXUIElementCopyAttributeValue(app, "AXWindows" as CFString, &value) : AXError.cannotComplete
+        var windowsRead: AXCapturedAttribute
+        var entryCount: Int?
+        var validCount = 0
+        var windows: [(AXUIElement, AXWindowDiagnostic)] = []
+        if !mayReadWindows { windowsRead = AXCapturedAttribute(status: "capture_deadline", value: nil, settable: nil, errorCode: nil, note: "AXWindows read was not started after deadline.") }
+        else if windowsError != .success { windowsRead = failure(windowsError) }
+        else if let objects = value as? [AnyObject] {
+            entryCount = objects.count
+            let candidates = objects.enumerated().filter { CFGetTypeID($0.element) == AXUIElementGetTypeID() }
+            validCount = candidates.count
+            windowsRead = AXCapturedAttribute(status: "ok", value: AXSnapshotValue(type: "window_reference_count", number: Double(objects.count)), settable: nil, errorCode: 0,
+                note: validCount == objects.count ? nil : "\(objects.count - validCount) AXWindows entries were not AX element references.")
+            if candidates.count > 128 {
+                windowsRead.note = (windowsRead.note.map { $0 + " " } ?? "") + "Only the first 128 AX window candidates were inspected; matching refuses an incomplete candidate inventory."
+            }
+            for candidate in candidates.prefix(128) {
+                guard budgetAvailable() else {
+                    windowsRead.note = (windowsRead.note.map { $0 + " " } ?? "") + "Candidate metadata inspection stopped at the original deadline."
+                    break
+                }
+                let window = unsafeBitCast(candidate.element, to: AXUIElement.self)
+                AXUIElementSetMessagingTimeout(window, 0.25)
+                let title = diagnosticAttribute(window, attribute: "AXTitle")
+                let position = diagnosticAttribute(window, attribute: "AXPosition")
+                let size = diagnosticAttribute(window, attribute: "AXSize")
+                let bounds: CGRect?
+                if let x = position.value?.components?["x"], let y = position.value?.components?["y"],
+                   let width = size.value?.components?["width"], let height = size.value?.components?["height"] {
+                    bounds = CGRect(x: x, y: y, width: width, height: height)
+                } else { bounds = nil }
+                windows.append((window, AXWindowDiagnostic(index: candidate.offset, title: title, position: position, size: size, bounds: bounds)))
+            }
+        } else {
+            windowsRead = AXCapturedAttribute(status: value == nil ? "empty_result" : "invalid_value_type", value: nil, settable: nil, errorCode: 0, note: "AXWindows succeeded without an element array; this is distinct from an empty window array.")
+        }
+        let result = AXApplicationDiagnosticResult(pid: pid, observedAt: Date(), accessibilityTrusted: Self.isAccessibilityTrusted,
+            attributeNamesRead: namesRead, availableAttributes: names, windowsRead: windowsRead,
+            windowEntryCount: entryCount, validWindowCount: validCount, candidates: windows.map { $0.1 }, accessibilityFeatures: features)
+        return (result, windows)
+    }
+
+    private func diagnosticAttribute(_ element: AXUIElement, attribute: String) -> AXCapturedAttribute {
+        guard budgetAvailable() else { return AXCapturedAttribute(status: "capture_deadline", value: nil, settable: nil, errorCode: nil, note: "Attribute read was not started after deadline.") }
+        var value: CFTypeRef?
+        let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
+        if error == .success, let value = value { return captured(value, node: "application_diagnostic", attribute: attribute) }
+        return failure(error)
+    }
+
+    private func selectWindow(app: AXUIElement, title: String?, bounds: CGRect?) throws -> (AXUIElement, String) {
+        var pid: pid_t = 0
+        AXUIElementGetPid(app, &pid)
+        var inspection = applicationInspection(app: app, pid: pid)
+        if Self.shouldRetryWindowInspection(inspection.result), deadline - ProcessInfo.processInfo.systemUptime > 0.05 {
+            let initialSummary = inspection.result.summary
+            note("window_inspection_retry", "Retrying window inventory once within the original capture deadline after a transient/empty result. \(initialSummary)")
+            Thread.sleep(forTimeInterval: 0.05)
+            if budgetAvailable() {
+                inspection = applicationInspection(app: app, pid: pid)
+                inspection.result.inspectionAttempts = 2
+                inspection.result.retryHistory = [initialSummary, inspection.result.summary]
+                note("window_inspection_retry_result", inspection.result.summary)
+            }
+        }
+        let diagnostic = inspection.result
+        guard diagnostic.windowsRead.status == "ok" else {
+            throw AXCaptureError.windowInspectionFailed("Cannot read a usable AX window inventory.", diagnostic)
+        }
+        guard diagnostic.validWindowCount == inspection.windows.count else {
+            throw AXCaptureError.windowInspectionFailed("AX window candidate inventory was incomplete because of a candidate/time limit; refusing incomplete matching.", diagnostic)
+        }
+        let windows = inspection.windows
+        if title == nil && bounds == nil {
+            if let focused = rawElement(app, "AXFocusedWindow"), windows.contains(where: { CFEqual($0.0, focused) }) { return (focused, "focused_window") }
+            if windows.count == 1 { return (windows[0].0, "single_window") }
+            throw AXCaptureError.windowInspectionFailed("No unique focused/single AX window could be selected.", diagnostic)
+        }
+        let titleMatches = windows.filter { title == nil || $0.1.title.value?.text == title }
         let matches = titleMatches.filter { window in
             guard let expected = bounds else { return true }
-            guard let actual = rawBounds(window) else { return false }
+            guard let actual = window.1.bounds else { return false }
             return abs(actual.minX - expected.minX) <= 3 && abs(actual.minY - expected.minY) <= 3 && abs(actual.width - expected.width) <= 3 && abs(actual.height - expected.height) <= 3
         }
-        if matches.count == 1 { return (matches[0], bounds == nil ? "exact_title" : (title == nil ? "bounds_within_3_points" : "exact_title_and_bounds_within_3_points")) }
-        if matches.count > 1 { throw AXCaptureError.ambiguousWindow(matches.count) }
-        throw AXCaptureError.windowNotFound("requested title=\(title ?? "(any)"), bounds=\(String(describing: bounds)); exposed titles=\(windows.compactMap { rawString($0, "AXTitle") }.joined(separator: "; "))")
+        if matches.count == 1 { return (matches[0].0, bounds == nil ? "exact_title" : (title == nil ? "bounds_within_3_points" : "exact_title_and_bounds_within_3_points")) }
+        if matches.count > 1 { throw AXCaptureError.windowInspectionFailed("\(matches.count) AX windows matched; refusing an arbitrary choice.", diagnostic) }
+        throw AXCaptureError.windowInspectionFailed("No AX window matched requested title (\(title?.count ?? 0) characters) and bounds \(String(describing: bounds)).", diagnostic)
+    }
+
+    static func shouldRetryWindowInspection(_ diagnostic: AXApplicationDiagnosticResult) -> Bool {
+        if diagnostic.windowsRead.status == "cannot_complete" || diagnostic.windowsRead.status == "no_value" { return true }
+        if diagnostic.windowsRead.status == "ok", diagnostic.windowEntryCount == 0 { return true }
+        return diagnostic.candidates.contains { candidate in
+            [candidate.title, candidate.position, candidate.size].contains { $0.status == "cannot_complete" }
+        }
     }
 
     private func readParameterizedText(_ element: AXUIElement, names: [String], node: String,
@@ -486,7 +665,7 @@ public final class AXCollector {
         if maxCount < count { limited = true; note("parameterized_text_range_limited", "Requested \(range.length) of \(count) UTF-16 units because of text budget.", node: node, attribute: key) }
     }
 
-    private func captured(_ raw: CFTypeRef, node: String, attribute: String) -> AXCapturedAttribute {
+    func captured(_ raw: CFTypeRef, node: String, attribute: String) -> AXCapturedAttribute {
         if CFGetTypeID(raw) == AXValueGetTypeID() {
             let value = unsafeBitCast(raw, to: AXValue.self)
             if AXValueGetType(value) == .axError {
@@ -497,8 +676,9 @@ public final class AXCollector {
         let value = serializeValue(raw, node: node, attribute: attribute)
         let unsupported = value.type == "unsupported" || value.type == "unsupported_ax_value"
         if unsupported { readErrors = true; note("unsupported_value_type", value.text ?? value.type, node: node, attribute: attribute) }
-        let status = unsupported ? "unsupported_value_type" : (value.type == "invalid" ? "invalid_value" : "ok")
-        return AXCapturedAttribute(status: status, value: value, settable: nil, errorCode: nil, note: nil)
+        let status = unsupported ? "unsupported_value_type" : (value.type == "invalid" ? "invalid_value" : (value.type == "opaque" ? "nonserializable" : "ok"))
+        let explanation = value.type == "opaque" ? "Provider-owned text marker handle. Presence is recorded; its process-local bytes/address are deliberately not serialized. This is not a content read failure." : nil
+        return AXCapturedAttribute(status: status, value: value, settable: nil, errorCode: nil, note: explanation)
     }
 
     /// Internal serializer is independently testable without a running application or AX permission.
@@ -574,6 +754,9 @@ public final class AXCollector {
             let cap = min(array.count, 4096)
             if cap < array.count { limited = true; note("attribute_array_limit", "Retained \(cap) of \(array.count) attribute entries.", node: node, attribute: attribute) }
             return AXSnapshotValue(type: "array", elements: array.prefix(cap).map { serializeValue($0, node: node, attribute: attribute, nesting: nesting + 1) }, truncated: cap < array.count)
+        }
+        if nonserializableTextMarkerAttributes.contains(attribute) {
+            return AXSnapshotValue(type: "opaque", text: "provider_owned_text_marker")
         }
         return AXSnapshotValue(type: "unsupported", text: "CFTypeID=\(typeID); Swift type=\(String(describing: type(of: raw)))")
     }
