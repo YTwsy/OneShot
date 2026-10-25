@@ -246,7 +246,7 @@ public final class AXCollector {
     private var pendingReferences: [(nodeID: String, attribute: String, targets: [AXUIElement])] = []
     private var referenceCount = 0
     private let childRelations: Set<String> = ["AXChildren", "AXRows", "AXContents", "AXColumns", "AXTabs"]
-    private let referenceRelations: Set<String> = ["AXSelectedChildren", "AXTitleUIElement", "AXLinkedUIElements"]
+    let referenceRelations: Set<String> = ["AXSelectedChildren", "AXSelectedRows", "AXSelectedCells", "AXTitleUIElement", "AXLinkedUIElements"]
     private let nonTraversedRelations: Set<String> = ["AXParent", "AXWindow", "AXTopLevelUIElement", "AXServesAsTitleForUIElements", "AXSharedTextUIElements", "AXVisibleChildren", "AXVisibleRows", "AXVisibleColumns", "AXFocusedUIElement"]
     private let fallbackAttributes = ["AXRole", "AXSubrole", "AXRoleDescription", "AXTitle", "AXDescription", "AXHelp", "AXValue", "AXURL", "AXDocument", "AXIdentifier", "AXEnabled", "AXSelected", "AXExpanded", "AXFocused", "AXPosition", "AXSize", "AXSelectedText", "AXSelectedTextRange", "AXNumberOfCharacters"]
     private let secureMetadataAttributes: Set<String> = ["AXRole", "AXSubrole", "AXRoleDescription", "AXTitle", "AXDescription", "AXHelp", "AXIdentifier", "AXEnabled", "AXFocused", "AXPosition", "AXSize", "AXRequired", "AXInvalid"]
@@ -430,25 +430,14 @@ public final class AXCollector {
         let nodePositions = Dictionary(uniqueKeysWithValues: nodes.enumerated().map { ($0.element.id, $0.offset) })
         for pending in pendingReferences {
             guard let position = nodePositions[pending.nodeID] else { continue }
-            var ids: [String] = []
-            var values: [AXSnapshotValue] = []
-            var unresolved = 0
-            for target in pending.targets {
-                if let index = existingIndex(target), capturedIDs.contains(identifier(index)) {
-                    let id = identifier(index)
-                    ids.append(id); values.append(AXSnapshotValue(type: "element_reference", text: id))
-                } else {
-                    unresolved += 1
-                    values.append(AXSnapshotValue(type: "unresolved_element_reference", text: "not_in_captured_window_tree"))
-                }
-            }
-            nodes[position].relations[pending.attribute] = ids
+            let resolved = resolveCapturedReferences(pending.targets, capturedIDs: capturedIDs)
+            nodes[position].relations[pending.attribute] = resolved.ids
             let truncated = nodes[position].attributes[pending.attribute]?.value?.truncated
-            nodes[position].attributes[pending.attribute]?.value = AXSnapshotValue(type: "element_references", elements: values, truncated: truncated)
-            if unresolved > 0 {
+            nodes[position].attributes[pending.attribute]?.value = AXSnapshotValue(type: "element_references", elements: resolved.values, truncated: truncated)
+            if resolved.unresolved > 0 {
                 nodes[position].attributes[pending.attribute]?.status = "partially_resolved"
                 let previous = nodes[position].attributes[pending.attribute]?.note.map { $0 + " " } ?? ""
-                nodes[position].attributes[pending.attribute]?.note = previous + "\(unresolved) of \(pending.targets.count) references were not found in captured target-window nodes; they were not followed or read."
+                nodes[position].attributes[pending.attribute]?.note = previous + "\(resolved.unresolved) of \(pending.targets.count) references were not found in captured target-window nodes; they were not followed or read."
                 note("unresolved_relation_members", nodes[position].attributes[pending.attribute]!.note!, node: pending.nodeID, attribute: pending.attribute)
             }
         }
@@ -465,8 +454,26 @@ public final class AXCollector {
         return result
     }
 
+    /// Resolve only after traversal: a container can expose selection handles before its rows
+    /// or cells have been registered. Referenced objects never expand the captured window tree.
+    func resolveCapturedReferences(_ targets: [AXUIElement], capturedIDs: Set<String>) -> (ids: [String], values: [AXSnapshotValue], unresolved: Int) {
+        var ids: [String] = []
+        var values: [AXSnapshotValue] = []
+        var unresolved = 0
+        for target in targets {
+            if let index = existingIndex(target), capturedIDs.contains(identifier(index)) {
+                let id = identifier(index)
+                ids.append(id); values.append(AXSnapshotValue(type: "element_reference", text: id))
+            } else {
+                unresolved += 1
+                values.append(AXSnapshotValue(type: "unresolved_element_reference", text: "not_in_captured_window_tree"))
+            }
+        }
+        return (ids, values, unresolved)
+    }
+
     /// Read relationship handles only. Resolution happens after traversal and never queues
-    /// referenced objects, so AXSelectedChildren/links cannot broaden capture to another window.
+    /// referenced objects, so selection/links cannot broaden capture to another window.
     private func readReferenceRelation(_ element: AXUIElement, attribute: String, node: String) -> AXCapturedAttribute {
         var count: CFIndex = 0
         let countError = AXUIElementGetAttributeValueCount(element, attribute as CFString, &count)
@@ -924,7 +931,7 @@ public final class AXCollector {
         return AXCapturedAttribute(status: status, value: nil, settable: nil, errorCode: Int(error.rawValue), note: nil)
     }
 
-    private func register(_ element: AXUIElement, depth: Int, parentID: String?) -> String? {
+    func register(_ element: AXUIElement, depth: Int, parentID: String?) -> String? {
         if let index = existingIndex(element) { return identifier(index) }
         guard depth <= options.maxDepth else { limited = true; note("depth_limit", "A child exceeded depth \(options.maxDepth).", node: parentID); return nil }
         guard elements.count < options.maxNodes else {

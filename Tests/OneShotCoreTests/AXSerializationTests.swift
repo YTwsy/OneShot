@@ -77,6 +77,31 @@ struct AXSerializationTests {
         #expect(collector.readErrors)
     }
 
+    @Test func selectionReferencesResolveAfterTraversalWithoutFollowingUnknownOrUnreadNodes() throws {
+        let collector = AXCollector()
+        #expect(collector.referenceRelations.isSuperset(of: ["AXSelectedRows", "AXSelectedCells"]))
+        // Creating AX handles performs no application read. Distinct PID identities stand in
+        // for row/cell targets, including a second handle equal to an already registered one.
+        let rowReference = AXUIElementCreateApplication(100_000_001)
+        let rowEncounteredLater = AXUIElementCreateApplication(100_000_001)
+        let cellReference = AXUIElementCreateApplication(100_000_002)
+        let unreadReference = AXUIElementCreateApplication(100_000_003)
+        let outsideReference = AXUIElementCreateApplication(100_000_004)
+        let pending = [rowReference, cellReference, unreadReference, outsideReference]
+        #expect(collector.resolveCapturedReferences(pending, capturedIDs: []).unresolved == 4)
+
+        let rowID = try #require(collector.register(rowEncounteredLater, depth: 2, parentID: "root"))
+        let cellID = try #require(collector.register(cellReference, depth: 3, parentID: rowID))
+        _ = try #require(collector.register(unreadReference, depth: 2, parentID: "root"))
+        let resolved = collector.resolveCapturedReferences(pending, capturedIDs: [rowID, cellID])
+        #expect(resolved.ids == [rowID, cellID])
+        #expect(resolved.values.map(\.type) == ["element_reference", "element_reference", "unresolved_element_reference", "unresolved_element_reference"])
+        #expect(resolved.values.prefix(2).map(\.text) == [rowID, cellID])
+        #expect(resolved.unresolved == 2)
+        // Resolving a pure reference never registers or reads an outside/unvisited target.
+        #expect(collector.serializeValue(outsideReference, node: "root", attribute: "AXSelectedRows").text == "outside_collected_tree")
+    }
+
     @Test func windowInspectionDistinguishesEmptyInventoryFromFailedMetadataAndRedactsTitles() throws {
         let ok = AXCapturedAttribute(status: "ok", value: nil, settable: nil, errorCode: 0, note: nil)
         var empty = AXApplicationDiagnosticResult(pid: 1, observedAt: Date(), accessibilityTrusted: true,
