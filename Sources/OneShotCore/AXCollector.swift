@@ -617,15 +617,54 @@ public final class AXCollector {
             if windows.count == 1 { return (windows[0].0, "single_window") }
             throw AXCaptureError.windowInspectionFailed("No unique focused/single AX window could be selected.", diagnostic)
         }
-        let titleMatches = windows.filter { title == nil || $0.1.title.value?.text == title }
-        let matches = titleMatches.filter { window in
-            guard let expected = bounds else { return true }
-            guard let actual = window.1.bounds else { return false }
-            return abs(actual.minX - expected.minX) <= 3 && abs(actual.minY - expected.minY) <= 3 && abs(actual.width - expected.width) <= 3 && abs(actual.height - expected.height) <= 3
+        let assessment = Self.assessWindowMatches(windows.map { $0.1 }, title: title, bounds: bounds)
+        if let index = assessment.uniqueMatchIndex { return (windows[index].0, bounds == nil ? "exact_title" : (title == nil ? "bounds_within_3_points" : "exact_title_and_bounds_within_3_points")) }
+        if !assessment.cannotExclude.isEmpty {
+            throw AXCaptureError.windowInspectionFailed("\(assessment.matches.count) AX windows matched, but \(assessment.cannotExclude.count) other candidates could not be excluded because matching metadata was unavailable; refusing an uncertain choice.", diagnostic)
         }
-        if matches.count == 1 { return (matches[0].0, bounds == nil ? "exact_title" : (title == nil ? "bounds_within_3_points" : "exact_title_and_bounds_within_3_points")) }
-        if matches.count > 1 { throw AXCaptureError.windowInspectionFailed("\(matches.count) AX windows matched; refusing an arbitrary choice.", diagnostic) }
+        if assessment.matches.count > 1 { throw AXCaptureError.windowInspectionFailed("\(assessment.matches.count) AX windows matched; refusing an arbitrary choice.", diagnostic) }
         throw AXCaptureError.windowInspectionFailed("No AX window matched requested title (\(title?.count ?? 0) characters) and bounds \(String(describing: bounds)).", diagnostic)
+    }
+
+    struct WindowMatchAssessment {
+        /// Array offsets, not provider window identifiers.
+        var matches: [Int] = []
+        var cannotExclude: [Int] = []
+        var uniqueMatchIndex: Int? { matches.count == 1 && cannotExclude.isEmpty ? matches[0] : nil }
+    }
+
+    /// A failed metadata read is unknown, never evidence that a window differs.
+    /// Any successfully read requested field can independently rule a candidate out.
+    static func assessWindowMatches(_ candidates: [AXWindowDiagnostic], title: String?, bounds: CGRect?) -> WindowMatchAssessment {
+        var result = WindowMatchAssessment()
+        for (index, candidate) in candidates.enumerated() {
+            var unknown = false
+            var differs = false
+            if let expected = title {
+                if candidate.title.status == "ok", candidate.title.value?.type == "string",
+                   candidate.title.value?.truncated != true, let actual = candidate.title.value?.text {
+                    differs = actual != expected
+                } else { unknown = true }
+            }
+            if let expected = bounds {
+                let components: [(AXCapturedAttribute, String, String, Double)] = [
+                    (candidate.position, "point", "x", expected.origin.x),
+                    (candidate.position, "point", "y", expected.origin.y),
+                    (candidate.size, "size", "width", expected.width),
+                    (candidate.size, "size", "height", expected.height)
+                ]
+                for (attribute, type, key, expectedValue) in components {
+                    if attribute.status == "ok", attribute.value?.type == type,
+                       let actual = attribute.value?.components?[key], actual.isFinite, expectedValue.isFinite {
+                        if abs(actual - expectedValue) > 3 { differs = true }
+                    } else { unknown = true }
+                }
+            }
+            if differs { continue }
+            if unknown { result.cannotExclude.append(index) }
+            else { result.matches.append(index) }
+        }
+        return result
     }
 
     static func shouldRetryWindowInspection(_ diagnostic: AXApplicationDiagnosticResult) -> Bool {

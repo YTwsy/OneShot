@@ -8,6 +8,7 @@
 
 - [采集完整度基准](docs/capture-baseline.md)：三份样本实际证明的信息范围、未验证能力与逐项验收方法。
 - [Codex Desktop AppShot 调查](docs/codex-appshot-investigation.md)：本机原生服务、富文本提取线索、公开与内部接口的复用边界。
+- [原生采集实测](docs/capture-validation-2026-10-25.md)：音乐、OpenSurge、Cursor 的实际产物、覆盖情况与尚未通过的门槛。
 - 独立实现 CoreGraphics 窗口定位、ScreenCaptureKit 截图、AX 结构与参数化富文本读取、可选 Vision 中文／英文 OCR。
 - 不按视口或元素尺寸剪裁语义遍历；保留来源、类型、选择／焦点、预算、读取失败和截断诊断。
 - 每次捕获保存到新的本地目录。读取已有捕获不重新访问应用；AX 失败也可独立保留成功取得的截图。
@@ -28,6 +29,8 @@ zsh scripts/run-probe.sh authorize
 ```
 
 `authorize` 是唯一主动显示 macOS 系统授权入口的命令，需要用户在系统设置中批准。开发版的 ad-hoc 签名与构建内容有关，重新构建后应再次检查授权，系统可能要求重新批准。启动脚本保留调用者工作目录，通过 CLI 原子写出的完成回执取得真实退出码；不把 `open` 的返回值当成采集结果。超时只停止等待，保留私有日志目录，不杀死进程或自动重采。
+
+本机实测发现，旧 ad-hoc 构建的系统开关即使仍显示开启，签名要求也可能不再匹配新版；仅切换开关不一定修复。遇到此情况应先确认 `doctor` 与系统 TCC 日志，再由用户重新添加当前 App 或仅重置该 bundle 的失效授权后重新批准。不要反复重建已获授权的实验构建。已有有效开发签名身份时，可显式指定 `ONESHOT_SIGN_IDENTITY` 运行构建脚本；脚本不会创建证书或修改系统授权，默认仍为 ad-hoc。
 
 ```sh
 zsh scripts/run-probe.sh windows --app com.apple.Music

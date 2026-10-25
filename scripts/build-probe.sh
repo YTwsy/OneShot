@@ -24,5 +24,5 @@ cat > "$oneshot_bundle/Contents/Info.plist" <<'PLIST'
 <key>NSScreenCaptureUsageDescription</key><string>Capture the window explicitly selected for a OneShot context experiment.</string>
 </dict></plist>
 PLIST
-codesign --force --sign - --identifier dev.oneshot.capture-probe "$oneshot_bundle"
+codesign --force --sign "${ONESHOT_SIGN_IDENTITY:--}" --identifier dev.oneshot.capture-probe "$oneshot_bundle"
 print "$oneshot_bundle"

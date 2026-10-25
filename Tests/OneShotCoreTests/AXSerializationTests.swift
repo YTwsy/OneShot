@@ -104,4 +104,57 @@ struct AXSerializationTests {
         #expect(restored.validWindowCount == 1)
         #expect(restored.windowsRead.status == "api_disabled")
     }
+
+    @Test func overlappingUnknownWindowPreventsUniqueMatch() {
+        let target = windowCandidate(title: "Document")
+        let failed = AXCapturedAttribute(status: "cannot_complete", value: nil, settable: nil,
+            errorCode: Int(AXError.cannotComplete.rawValue), note: nil)
+        for unreadAttribute in ["title", "position", "size"] {
+            var unknown = target
+            switch unreadAttribute {
+            case "title": unknown.title = failed
+            case "position": unknown.position = failed
+            default: unknown.size = failed
+            }
+            let assessment = AXCollector.assessWindowMatches([target, unknown], title: "Document", bounds: target.bounds)
+            #expect(assessment.matches == [0])
+            #expect(assessment.cannotExclude == [1])
+            #expect(assessment.uniqueMatchIndex == nil)
+        }
+    }
+
+    @Test func differentKnownTitleExcludesWindowWithUnreadBounds() {
+        let target = windowCandidate(title: "Document")
+        var other = windowCandidate(title: "Different document")
+        other.position.status = "cannot_complete"
+        other.size.status = "cannot_complete"
+        other.bounds = nil
+        let assessment = AXCollector.assessWindowMatches([target, other], title: "Document", bounds: target.bounds)
+        #expect(assessment.matches == [0])
+        #expect(assessment.cannotExclude.isEmpty)
+        #expect(assessment.uniqueMatchIndex == 0)
+    }
+
+    @Test func differentKnownBoundsExcludeWindowWithUnreadTitle() {
+        let target = windowCandidate(title: "Document")
+        var other = windowCandidate(title: "Document", bounds: CGRect(x: 800, y: 20, width: 640, height: 480))
+        other.title.status = "cannot_complete"
+        // A known different position still excludes the window when size is also unreadable.
+        other.size.status = "cannot_complete"
+        other.bounds = nil
+        let assessment = AXCollector.assessWindowMatches([target, other], title: "Document", bounds: target.bounds)
+        #expect(assessment.matches == [0])
+        #expect(assessment.cannotExclude.isEmpty)
+        #expect(assessment.uniqueMatchIndex == 0)
+    }
+
+    private func windowCandidate(title: String, bounds: CGRect = CGRect(x: 10, y: 20, width: 640, height: 480)) -> AXWindowDiagnostic {
+        func attribute(_ value: AXSnapshotValue) -> AXCapturedAttribute {
+            AXCapturedAttribute(status: "ok", value: value, settable: nil, errorCode: nil, note: nil)
+        }
+        return AXWindowDiagnostic(index: 0, title: attribute(AXSnapshotValue(type: "string", text: title)),
+            position: attribute(AXSnapshotValue(type: "point", components: ["x": bounds.origin.x, "y": bounds.origin.y])),
+            size: attribute(AXSnapshotValue(type: "size", components: ["width": bounds.width, "height": bounds.height])),
+            bounds: bounds)
+    }
 }
