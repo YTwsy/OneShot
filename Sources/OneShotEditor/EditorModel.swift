@@ -103,7 +103,7 @@ final class EditorModel: ObservableObject {
         if panel.runModal() == .OK, let url = panel.url { open(url) }
     }
 
-    func open(_ url: URL) {
+    @discardableResult func open(_ url: URL) -> Bool {
         do {
             let loaded = url.pathExtension.lowercased() == "oneshot"
                 ? try AnnotationStore.openProject(at: url) : try AnnotationStore.openCapture(at: url)
@@ -118,7 +118,8 @@ final class EditorModel: ObservableObject {
             expandedElements = Set(elementIndex?.elements.filter { $0.depth < 3 }.map(\.id) ?? [])
             status = "\(loaded.document.imageWidth) × \(loaded.document.imageHeight) · 截图与原始上下文已载入"
             updateWindow()
-        } catch { show(error) }
+            return true
+        } catch { show(error); return false }
     }
 
     @discardableResult func save(asNew: Bool = false) -> Bool {

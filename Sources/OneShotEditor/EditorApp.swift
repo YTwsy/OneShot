@@ -15,10 +15,12 @@ enum EditorApp {
 }
 
 @MainActor
-final class EditorDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation {
+final class EditorDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation, NSMenuDelegate {
     let model = EditorModel()
+    lazy var capture = CaptureController(model: model)
     var window: NSWindow!
-    private var closingApproved = false
+    private var statusItem: NSStatusItem?
+    private var captureStatusItem: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1240, height: 820),
@@ -26,9 +28,13 @@ final class EditorDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         window.minSize = NSSize(width: 900, height: 620)
         window.title = "OneShot"
         window.delegate = self; window.isReleasedWhenClosed = false
-        window.contentView = NSHostingView(rootView: EditorRootView(model: model))
+        window.contentView = NSHostingView(rootView: EditorRootView(model: model, capture: capture))
         model.window = window
+        capture.showEditor = { [weak self] in self?.showEditor() }
+        capture.hideEditor = { [weak self] in self?.window.orderOut(nil); NSApp.hide(nil) }
         makeMenus()
+        makeStatusMenu()
+        capture.enableShortcut()
         window.center(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
         let arguments = CommandLine.arguments
         if let flag = arguments.firstIndex(of: "--capture"), arguments.indices.contains(flag + 1) {
@@ -40,9 +46,38 @@ final class EditorDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         if let path = filenames.first, model.confirmUnsaved() { model.open(URL(fileURLWithPath: path)) }
         sender.reply(toOpenOrPrint: .success)
     }
-    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply { (closingApproved || model.confirmUnsaved()) ? .terminateNow : .terminateCancel }
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
-    func windowShouldClose(_ sender: NSWindow) -> Bool { closingApproved = model.confirmUnsaved(); return closingApproved }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply { model.confirmUnsaved() ? .terminateNow : .terminateCancel }
+    func applicationWillTerminate(_ notification: Notification) { capture.stop() }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+    func windowShouldClose(_ sender: NSWindow) -> Bool { model.confirmUnsaved() }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showEditor(); return true }
+    @objc func showEditor() {
+        window.deminiaturize(nil); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func makeStatusMenu() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        item.button?.image = NSImage(systemSymbolName: "viewfinder", accessibilityDescription: "OneShot 采集")
+        item.button?.toolTip = "OneShot · \(GlobalCaptureHotKey.displayString) 采集当前应用"
+        let menu = NSMenu(); menu.delegate = self
+        add(menu, "打开标注工作台", #selector(showEditor), "")
+        add(menu, "3 秒后采集当前应用", #selector(countdownCapture), "")
+        add(menu, "取消倒计时", #selector(cancelCaptureCountdown), "")
+        menu.addItem(.separator())
+        let status = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        menu.addItem(status); captureStatusItem = status
+        add(menu, "打开采集目录", #selector(revealCaptures), "")
+        add(menu, "选择采集组件…", #selector(chooseProbe), "")
+        add(menu, "重新启用快捷键", #selector(enableShortcut), "")
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "退出 OneShot", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        item.menu = menu; statusItem = item
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        captureStatusItem?.title = capture.isCapturing ? "采集中…" : capture.countdown.map { "\($0) 秒后采集" }
+            ?? (capture.shortcutRegistered ? "\(GlobalCaptureHotKey.displayString) 已启用" : "采集快捷键未启用")
+    }
 
     func makeMenus() {
         let bar = NSMenu()
@@ -52,6 +87,7 @@ final class EditorDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "退出 OneShot", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let file = NSMenuItem(); file.title = "文件"; file.submenu = NSMenu(title: "文件"); bar.addItem(file)
+        add(file.submenu!, "3 秒后采集当前应用", #selector(countdownCapture), "")
         add(file.submenu!, "打开…", #selector(openAction), "o")
         add(file.submenu!, "保存", #selector(saveAction), "s")
         add(file.submenu!, "另存为…", #selector(saveAsAction), "s", [.command, .shift])
@@ -75,9 +111,16 @@ final class EditorDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     @objc func saveAction() { model.save() }
     @objc func saveAsAction() { model.save(asNew: true) }
     @objc func exportAction() { model.exportPNG() }
+    @objc func countdownCapture() { capture.captureAfterCountdown() }
+    @objc func cancelCaptureCountdown() { capture.cancelCountdown() }
+    @objc func chooseProbe() { showEditor(); capture.chooseProbe() }
+    @objc func revealCaptures() { capture.revealCaptures() }
+    @objc func enableShortcut() { capture.enableShortcut() }
     @objc func undo(_ sender: Any?) { model.undo() }
     @objc func redo(_ sender: Any?) { model.redo() }
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(countdownCapture) || menuItem.action == #selector(chooseProbe) { return !capture.isCapturing && capture.countdown == nil }
+        if menuItem.action == #selector(cancelCaptureCountdown) { return capture.countdown != nil }
         if menuItem.action == #selector(undo(_:)) { return !model.undoHistory.isEmpty }
         if menuItem.action == #selector(redo(_:)) { return !model.redoHistory.isEmpty }
         if [#selector(saveAction), #selector(saveAsAction), #selector(exportAction)].contains(menuItem.action) { return model.project != nil }
@@ -87,6 +130,7 @@ final class EditorDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
 
 struct EditorRootView: View {
     @ObservedObject var model: EditorModel
+    @ObservedObject var capture: CaptureController
     let colors = ["#E5484D", "#F59E0B", "#30A46C", "#3E63DD", "#8E4EC6", "#FFFFFF", "#202124"]
     var body: some View {
         VStack(spacing: 0) {
@@ -98,6 +142,29 @@ struct EditorRootView: View {
                 Button("保存项目", systemImage: "square.and.arrow.down") { model.save() }.disabled(model.project == nil)
                 Button("导出 PNG", systemImage: "square.and.arrow.up", action: model.exportPNG).disabled(model.project == nil)
             }.padding(18)
+            Divider()
+            HStack(spacing: 12) {
+                if capture.isCapturing { ProgressView().controlSize(.small) }
+                else { Image(systemName: "viewfinder").foregroundStyle(.secondary) }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(capture.message).font(.caption).textSelection(.enabled).lineLimit(3)
+                    if let ready = capture.pending.first {
+                        HStack {
+                            Text("\(capture.pending.count) 份新采集待打开").font(.caption).foregroundStyle(.secondary)
+                            Button("打开 \(ready.applicationName) 的采集") { capture.openPending(ready) }
+                        }
+                    }
+                }
+                Spacer()
+                Button("3 秒后采集") { capture.captureAfterCountdown() }
+                    .disabled(capture.isCapturing || capture.countdown != nil)
+                Menu("采集设置") {
+                    Text("快捷键：\(GlobalCaptureHotKey.displayString)")
+                    Button("重新启用快捷键", action: capture.enableShortcut)
+                    Button("选择采集组件…", action: capture.chooseProbe).disabled(capture.isCapturing)
+                    Button("打开采集目录", action: capture.revealCaptures)
+                }.fixedSize()
+            }.padding(.horizontal, 18).padding(.vertical, 10)
             Divider()
             if let document = model.document, let image = model.image {
                 HStack(spacing: 0) {
