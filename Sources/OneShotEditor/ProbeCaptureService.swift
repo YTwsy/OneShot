@@ -49,6 +49,7 @@ final class ProbeCaptureService {
         var launchError: String?
         var postLaunchTargetValid: Bool?
         var receiptProcessID: Int32?
+        var processIdentity = ProbeProcessIdentity()
         var launchCallbackMilliseconds: Double?
         var isAwaited = true
         init(directory: URL, receiptURL: URL) { self.directory = directory; self.receiptURL = receiptURL }
@@ -61,6 +62,7 @@ final class ProbeCaptureService {
         var application: NSRunningApplication?
         var launchError: String?
         var launchObserved = false
+        var processIdentity = ProbeProcessIdentity()
         init(command: String, directory: URL) {
             self.command = command; self.directory = directory
             receiptURL = directory.appendingPathComponent("receipt.json")
@@ -148,7 +150,7 @@ final class ProbeCaptureService {
         var latestProgress: CaptureProgress?
         let progressURL = CaptureProgressWriter.sidecarURL(completionURL: run.receiptURL)
         func observeProgress(expectedCaptureID: String? = nil) {
-            guard let expectedPID = run.receiptProcessID ?? run.application?.processIdentifier,
+            guard let expectedPID = run.receiptProcessID ?? run.processIdentity.observedProcessID,
                   let data = try? Self.readRegular(progressURL, maximum: 65_536),
                   let value = try? CaptureProgress.decode(data),
                   expectedPID == value.processID,
@@ -179,18 +181,21 @@ final class ProbeCaptureService {
         NSWorkspace.shared.openApplication(at: probeURL, configuration: configuration) { application, error in
             Task { @MainActor in
                 run.application = application
+                run.processIdentity.observe(application?.processIdentifier)
                 run.launchError = error?.localizedDescription
                 run.launchCallbackMilliseconds = max(0, (ProcessInfo.processInfo.systemUptime - launchStarted) * 1000)
                 run.postLaunchTargetValid = Self.targetIsAvailable(appBundleIdentifier: appBundleIdentifier, window: window)
                 try? runStore.write(LaunchObservation(launchError: run.launchError,
                     postLaunchTargetValid: run.postLaunchTargetValid, receiptProcessID: nil,
-                    applicationProcessID: application?.processIdentifier), named: "launch-callback.json")
+                    applicationProcessID: run.processIdentity.observedProcessID,
+                    applicationProcessIDStatus: run.processIdentity.observedProcessID == nil ? "unknown" : "observed"), named: "launch-callback.json")
             }
         }
         defer {
             try? runStore.write(LaunchObservation(launchError: run.launchError,
                 postLaunchTargetValid: run.postLaunchTargetValid, receiptProcessID: run.receiptProcessID,
-                applicationProcessID: run.application?.processIdentifier), named: "launch.json")
+                applicationProcessID: run.processIdentity.observedProcessID,
+                applicationProcessIDStatus: run.processIdentity.observedProcessID == nil ? "unknown" : "observed"), named: "launch.json")
             try? runStore.write(currentTimings(), named: "service-timings.json")
         }
         let duration = timeoutSeconds.isFinite ? min(300, max(1, timeoutSeconds)) : 120
@@ -205,6 +210,9 @@ final class ProbeCaptureService {
                 defer { verificationMilliseconds = max(0, (ProcessInfo.processInfo.systemUptime - verificationStarted) * 1000) }
                 do {
                     let receipt = try ProbeCaptureVerification.receipt(from: Self.readRegular(run.receiptURL, maximum: 65_536))
+                    guard run.processIdentity.acceptsReceipt(processID: receipt.processID) else {
+                        throw ProbeCaptureVerificationError.invalidReceipt
+                    }
                     run.receiptProcessID = receipt.processID
                     // A valid receipt establishes process completion even if the launch callback failed.
                     activeRun = nil
@@ -325,10 +333,11 @@ final class ProbeCaptureService {
         NSWorkspace.shared.openApplication(at: probeURL, configuration: configuration) { application, error in
             Task { @MainActor in
                 run.application = application
+                run.processIdentity.observe(application?.processIdentifier)
                 run.launchError = error?.localizedDescription
                 run.launchObserved = true
                 try? store.write(["command": command, "launchError": run.launchError ?? "",
-                    "processID": application.map { String($0.processIdentifier) } ?? ""], named: "launch.json")
+                    "processID": run.processIdentity.observedProcessID.map(String.init) ?? "unknown"], named: "launch.json")
             }
         }
         return run
@@ -352,7 +361,7 @@ final class ProbeCaptureService {
         guard receipt.schemaVersion == 1, receipt.command == run.command,
               receipt.processID > 0, receipt.finishedAt >= receipt.startedAt,
               (0...255).contains(receipt.exitCode),
-              run.application.map({ $0.processIdentifier == receipt.processID }) ?? true else {
+              run.processIdentity.acceptsReceipt(processID: receipt.processID) else {
             throw ProbeCaptureVerificationError.invalidReceipt
         }
         return receipt
@@ -396,6 +405,7 @@ final class ProbeCaptureService {
         let postLaunchTargetValid: Bool?
         let receiptProcessID: Int32?
         let applicationProcessID: Int32?
+        let applicationProcessIDStatus: String
     }
 
 }
