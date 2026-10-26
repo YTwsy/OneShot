@@ -1,0 +1,26 @@
+name: Build and test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Show toolchain
+        run: swift --version
+      - name: Check release metadata
+        run: python3 scripts/test_release_metadata.py
+      - name: Run Swift tests
+        run: zsh scripts/test.sh
+      - name: Compile release products
+        run: |
+          swift build -c release --arch arm64 --product oneshot-editor
+          swift build -c release --arch arm64 --product oneshot
+          swift build -c release --arch arm64 --product oneshot-mcp

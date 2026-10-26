@@ -47,7 +47,7 @@ public enum FrontmostCaptureSelectionError: LocalizedError, Equatable {
 }
 
 public enum FrontmostCaptureSelection {
-    public static let excludedBundleIdentifiers: Set<String> = ["dev.oneshot.editor", "dev.oneshot.capture-probe"]
+    public static let excludedBundleIdentifiers: Set<String> = AppDistribution.allBundleIdentifiers
     public static let selectionBasis = "frontmost_application_and_front_to_back_normal_window"
 
     /// Input order must be Core Graphics front-to-back order, not sorted by title or ID.

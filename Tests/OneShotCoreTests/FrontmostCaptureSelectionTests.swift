@@ -38,7 +38,7 @@ struct FrontmostCaptureSelectionTests {
         #expect(throws: FrontmostCaptureSelectionError.excludedApplication) {
             try FrontmostCaptureSelection.select(application: app, windowsFrontToBack: [window(1)], excludingPIDs: [42])
         }
-        for bundle in ["dev.oneshot.editor", "dev.oneshot.capture-probe"] {
+        for bundle in AppDistribution.allBundleIdentifiers {
             #expect(throws: FrontmostCaptureSelectionError.excludedApplication) {
                 try FrontmostCaptureSelection.select(application: .init(pid: 42, name: "OneShot", bundleIdentifier: bundle),
                                                      windowsFrontToBack: [window(1, bundle: bundle)])

@@ -46,25 +46,61 @@ struct CLIError: LocalizedError {
     var errorDescription: String? { text }
 }
 
+/// Best-effort telemetry never changes whether a screenshot/context capture succeeds.
+private final class CaptureTelemetry {
+    private let writer: CaptureProgressWriter?
+    private var phase: CapturePhase = .startup
+    private var phaseStarted: TimeInterval
+    private var timings: [CapturePhaseTiming] = []
+    var captureID: String?
+
+    init(started: TimeInterval, completionURL: URL?) {
+        phaseStarted = started
+        writer = completionURL.map { CaptureProgressWriter(destination: CaptureProgressWriter.sidecarURL(completionURL: $0)) }
+        publish()
+    }
+
+    func begin(_ next: CapturePhase) {
+        phase = next; phaseStarted = ProcessInfo.processInfo.systemUptime; publish()
+    }
+
+    func finish(_ status: String) {
+        timings.append(CapturePhaseTiming(phase: phase,
+            durationMilliseconds: max(0, (ProcessInfo.processInfo.systemUptime - phaseStarted) * 1000), status: status))
+    }
+
+    var snapshot: CaptureProgress { CaptureProgress(captureID: captureID, phase: phase, timings: timings) }
+    func completed() { phase = .completed; publish() }
+    func failed() {
+        if phase != .completed && phase != .failed {
+            finish("failed"); phase = .failed; publish()
+        }
+    }
+    private func publish() { try? writer?.write(snapshot) }
+}
+
 @main
 struct OneShotCLI {
     static func main() async {
         let startedAt = Date()
+        let started = ProcessInfo.processInfo.systemUptime
         let raw = Array(CommandLine.arguments.dropFirst())
         // Resolve the runner's receipt before argument validation, so malformed commands
         // also finish explicitly. The runner always passes an absolute, new destination.
         var completionURL: URL?
         var exitCode: Int32 = 0
         var failureMessage: String?
+        var telemetry: CaptureTelemetry?
         do {
             completionURL = try CommandCompletion.requestedURL(in: raw)
+            if raw.first == "capture" { telemetry = CaptureTelemetry(started: started, completionURL: completionURL) }
             let args = try Arguments(raw)
             if let directory = args.values["--working-directory"], !FileManager.default.changeCurrentDirectoryPath(directory) {
                 throw CLIError("Cannot use working directory: \(directory)")
             }
             switch args.flags.contains("--help") ? "help" : args.command {
             case "help", "--help", "-h": print(help)
-            case "doctor": try doctor()
+            case "doctor": try doctor(args)
             case "authorize": await authorize()
             case "windows":
                 let app = try args.required("--app")
@@ -72,7 +108,7 @@ struct OneShotCLI {
             case "diagnose":
                 let window = try selectedWindow(args)
                 try printJSON(AXCollector().inspectApplication(pid: window.pid))
-            case "capture": exitCode = try await capture(args)
+            case "capture": exitCode = try await capture(args, telemetry: telemetry!)
             case "read":
                 let directory = URL(fileURLWithPath: try args.required("--capture"), isDirectory: true)
                 print(try SnapshotStore.readContext(from: directory))
@@ -86,6 +122,7 @@ struct OneShotCLI {
             default: throw CLIError("Unknown command '\(args.command)'. Run oneshot help.")
             }
         } catch {
+            telemetry?.failed()
             exitCode = 1
             failureMessage = error.localizedDescription
             FileHandle.standardError.write(Data("oneshot: \(error.localizedDescription)\n".utf8))
@@ -102,7 +139,7 @@ struct OneShotCLI {
         exit(exitCode)
     }
 
-    static func doctor() throws {
+    static func doctor(_ args: Arguments) throws {
         let result: [String: String] = [
             "os": ProcessInfo.processInfo.operatingSystemVersionString,
             "executable": Bundle.main.executableURL?.path ?? CommandLine.arguments[0],
@@ -111,6 +148,10 @@ struct OneShotCLI {
             "permissionsRequested": "false",
             "note": "Only checks this process. No capture, prompts, settings changes, or application activation."
         ]
+        if let output = args.values["--output"] {
+            let store = try SnapshotStore(newDirectory: URL(fileURLWithPath: output, isDirectory: true))
+            try store.write(result, named: "doctor.json")
+        }
         try printJSON(result)
     }
 
@@ -142,7 +183,7 @@ struct OneShotCLI {
         return try WindowSelection.select(from: WindowCapture.listWindows(), app: app, windowID: windowID)
     }
 
-    static func capture(_ args: Arguments) async throws -> Int32 {
+    private static func capture(_ args: Arguments, telemetry: CaptureTelemetry) async throws -> Int32 {
         let app = try args.required("--app")
         var window = try selectedWindow(args)
         let timeout: Double
@@ -161,6 +202,12 @@ struct OneShotCLI {
         let id = UUID().uuidString
         let start = Date()
         let store = try newStore(args, id: id)
+        telemetry.captureID = id
+        defer {
+            if telemetry.snapshot.phase != .completed { telemetry.failed() }
+            // Also retain completed phase durations when a later file write fails.
+            try? store.write(telemetry.snapshot, named: "timings.json")
+        }
         var accessibilityPreparation: ComponentOutcome?
         if args.flags.contains("--enable-electron-ax") {
             let preparation = ElectronAccessibility.enable(pid: window.pid)
@@ -175,6 +222,8 @@ struct OneShotCLI {
         var ocr = ComponentOutcome(status: "not_requested")
         var context = "OneShot capture \(id)\nApp: \(window.ownerName)\nWindow: \(window.title)\nWindow ID: \(window.id) | PID: \(window.pid)\n\n"
 
+        telemetry.finish("completed")
+        telemetry.begin(.screenshot)
         if !args.flags.contains("--no-image") {
             do {
                 let imageResult = try await WindowCapture.capture(window: window, to: store.directory.appendingPathComponent("screenshot.png"))
@@ -184,6 +233,8 @@ struct OneShotCLI {
                 screenshot = ComponentOutcome(status: "failed", error: error.localizedDescription)
             }
         }
+        telemetry.finish(screenshot.status)
+        telemetry.begin(.accessibility)
         do {
             let result = try AXCollector(options: options).capture(pid: window.pid, windowTitle: window.title.isEmpty ? nil : window.title, windowBounds: window.cgRect)
             try store.write(result, named: "accessibility.json")
@@ -196,9 +247,11 @@ struct OneShotCLI {
             accessibility = ComponentOutcome(status: "failed", error: error.localizedDescription)
             context += "[Accessibility failed]\n\(error.localizedDescription)\n"
         }
+        telemetry.finish(accessibility.status)
         // Capture identity is checked before optional OCR, which only reads the frozen PNG.
         let after = WindowCapture.listWindows().first { $0.id == window.id && $0.pid == window.pid }
         let identityStable = after.map { $0.title == window.title && $0.bounds == window.bounds } ?? false
+        telemetry.begin(.ocr)
         if args.flags.contains("--ocr") {
             if screenshot.status == "captured" {
                 do {
@@ -209,6 +262,8 @@ struct OneShotCLI {
                 } catch { ocr = ComponentOutcome(status: "failed", error: error.localizedDescription) }
             } else { ocr = ComponentOutcome(status: "unavailable", error: "No captured screenshot is available") }
         }
+        telemetry.finish(ocr.status)
+        telemetry.begin(.finalize)
         let bundleURL = NSRunningApplication(processIdentifier: window.pid)?.bundleURL
         let version = bundleURL.flatMap { Bundle(url: $0)?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String }
         let manifest = SnapshotManifest(
@@ -227,6 +282,8 @@ struct OneShotCLI {
         )
         try store.writeText(context, named: "context.txt")
         try store.write(manifest, named: "manifest.json")
+        telemetry.finish("completed")
+        telemetry.completed()
         print("Capture saved: \(store.directory.path)")
         try printJSON(manifest)
         return accessibility.status == "failed" && screenshot.status != "captured" ? 2 : 0
@@ -257,7 +314,9 @@ struct OneShotCLI {
     oneshot ocr --image <existing image> [--output <NEW directory>]
 
     A capture saves manifest.json, accessibility.json, context.txt and, when available,
-    screenshot.png/screenshot.json and ocr.json. Failures are explicit in the manifest.
+    screenshot.png/screenshot.json and ocr.json. Monotonic phase timings are in timings.json.
+    With --completion-file, a private <completion-file>.progress.json sidecar reports phases.
+    Failures are explicit in the manifest; progress is diagnostic, never a completion receipt.
     Window selection is explicit and ambiguous matches are rejected. This probe never
     changes focus or scrolls. Electron accessibility is passive unless explicitly enabled
     with --enable-electron-ax; that request and its result are saved. Only 'authorize' requests

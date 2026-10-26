@@ -1,0 +1,33 @@
+OneShot Preview — macOS 14+ / Apple Silicon
+
+Install
+1. Drag OneShot.app to Applications.
+2. Eject this disk image, then open /Applications/OneShot.app.
+3. Review the first-run permission guide. Capture requires Screen Recording and
+   Accessibility approval for the bundled OneShot Capture component.
+
+This preview is ad-hoc signed and has NOT been notarized by Apple. It has no
+Developer ID signature. macOS may block the downloaded application. Review the
+system's security prompts and the project's release information before opening.
+Do not disable Gatekeeper or other system protections.
+
+Capture, annotations and Agent handoff are stored locally. Exporting material
+does not send it to a remote service. Review captures before sharing them.
+
+MCP command after installation:
+  /Applications/OneShot.app/Contents/Helpers/oneshot-mcp
+Arguments:
+  --handoff /absolute/path/to/one-export
+
+Updates in this preview are manual: quit OneShot, download a newer release, and
+replace the application. Recheck macOS permissions after replacement; ad-hoc
+signatures do not provide a stable Developer ID identity across builds.
+
+Project: https://github.com/YTwsy/OneShot
+License: MIT (included in this distribution)
+
+安装：将 OneShot.app 拖到 Applications，推出磁盘映像后打开应用。
+首版仅支持 macOS 14 及以上、Apple Silicon；采用 ad-hoc 签名，未公证，
+不包含 Developer ID 签名。请阅读系统安全提示与发布说明，不要关闭系统安全保护。
+采集需要为内置 OneShot Capture 组件批准屏幕录制和辅助功能权限。
+首版使用手动下载替换更新；更换应用后应重新核对系统权限。

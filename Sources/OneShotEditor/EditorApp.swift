@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import OneShotCore
+import Combine
 
 @main
 enum EditorApp {
@@ -21,11 +22,12 @@ final class EditorDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     var window: NSWindow!
     private var statusItem: NSStatusItem?
     private var captureStatusItem: NSMenuItem?
+    private var activityObservation: AnyCancellable?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1240, height: 820),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.minSize = NSSize(width: 900, height: 620)
+        window.minSize = NSSize(width: 1080, height: 620)
         window.title = "OneShot"
         window.delegate = self; window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(rootView: EditorRootView(model: model, capture: capture))
@@ -46,7 +48,13 @@ final class EditorDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         if let path = filenames.first, model.confirmUnsaved() { model.open(URL(fileURLWithPath: path)) }
         sender.reply(toOpenOrPrint: .success)
     }
-    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply { model.confirmUnsaved() ? .terminateNow : .terminateCancel }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !model.isExportingHandoff else {
+            model.status = "Agent 材料正在导出，请等待完成后再退出。"
+            return .terminateCancel
+        }
+        return model.confirmUnsaved() ? .terminateNow : .terminateCancel
+    }
     func applicationWillTerminate(_ notification: Notification) { capture.stop() }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func windowShouldClose(_ sender: NSWindow) -> Bool { model.confirmUnsaved() }
@@ -67,11 +75,20 @@ final class EditorDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         let status = NSMenuItem(title: "", action: nil, keyEquivalent: "")
         menu.addItem(status); captureStatusItem = status
         add(menu, "打开采集目录", #selector(revealCaptures), "")
+        add(menu, "检查已完成的采集", #selector(recoverCaptures), "")
+        add(menu, "检查采集权限", #selector(checkCapturePermissions), "")
+        add(menu, "授权采集组件…", #selector(authorizeCapture), "")
         add(menu, "选择采集组件…", #selector(chooseProbe), "")
         add(menu, "重新启用快捷键", #selector(enableShortcut), "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "退出 OneShot", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         item.menu = menu; statusItem = item
+        activityObservation = capture.$isCapturing.combineLatest(capture.$countdown).sink { [weak item] active, countdown in
+            item?.button?.image = NSImage(systemSymbolName: active ? "viewfinder.circle.fill" : "viewfinder", accessibilityDescription: active ? "OneShot 正在采集" : "OneShot 采集")
+            item?.button?.title = active ? "…" : countdown.map(String.init) ?? ""
+            item?.length = active || countdown != nil ? NSStatusItem.variableLength : NSStatusItem.squareLength
+            item?.button?.toolTip = active ? "OneShot 正在采集，请保持目标窗口" : "OneShot · \(GlobalCaptureHotKey.displayString) 采集当前应用"
+        }
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -83,15 +100,19 @@ final class EditorDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         let bar = NSMenu()
         let application = NSMenuItem(); bar.addItem(application)
         let appMenu = NSMenu(); application.submenu = appMenu
-        appMenu.addItem(withTitle: "关于 OneShot", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        add(appMenu, "关于 OneShot", #selector(showAbout), "")
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "退出 OneShot", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let file = NSMenuItem(); file.title = "文件"; file.submenu = NSMenu(title: "文件"); bar.addItem(file)
         add(file.submenu!, "3 秒后采集当前应用", #selector(countdownCapture), "")
+        add(file.submenu!, "检查采集权限", #selector(checkCapturePermissions), "")
+        add(file.submenu!, "授权采集组件…", #selector(authorizeCapture), "")
+        file.submenu!.addItem(.separator())
         add(file.submenu!, "打开…", #selector(openAction), "o")
         add(file.submenu!, "保存", #selector(saveAction), "s")
         add(file.submenu!, "另存为…", #selector(saveAsAction), "s", [.command, .shift])
         add(file.submenu!, "导出 PNG…", #selector(exportAction), "e")
+        add(file.submenu!, "交给 Agent…", #selector(handoffAction), "e", [.command, .shift])
         let edit = NSMenuItem(); edit.title = "编辑"; edit.submenu = NSMenu(title: "编辑"); bar.addItem(edit)
         // Responder-chain actions preserve native text editing in the inspector.
         edit.submenu!.addItem(withTitle: "撤销", action: #selector(undo(_:)), keyEquivalent: "z")
@@ -108,21 +129,53 @@ final class EditorDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         let item = menu.addItem(withTitle: title, action: selector, keyEquivalent: key); item.target = self; item.keyEquivalentModifierMask = modifiers
     }
     @objc func openAction() { model.openPanel() }
+    @objc func showAbout() {
+        guard capture.usesEmbeddedCapture else {
+            NSApp.orderFrontStandardAboutPanel(nil)
+            return
+        }
+        let bundle = Bundle.main
+        let release = bundle.object(forInfoDictionaryKey: "OneShotReleaseTag") as? String
+            ?? bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "开发构建"
+        let build = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
+        var details: [String] = []
+        if bundle.object(forInfoDictionaryKey: "OneShotDistributionChannel") as? String == "prerelease" {
+            details.append("预发布测试版")
+        }
+        if bundle.object(forInfoDictionaryKey: "OneShotSigningStatus") as? String == "ad-hoc-unnotarized" {
+            details.append("ad-hoc 签名 · 未经 Apple 公证")
+        }
+        if let commit = bundle.object(forInfoDictionaryKey: "OneShotSourceCommit") as? String {
+            details.append("源代码提交：\(commit.prefix(12))")
+        }
+        let credits = NSAttributedString(string: details.joined(separator: "\n"), attributes: [
+            .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor,
+        ])
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .applicationName: "OneShot", .applicationVersion: release, .version: build, .credits: credits,
+        ])
+    }
     @objc func saveAction() { model.save() }
     @objc func saveAsAction() { model.save(asNew: true) }
     @objc func exportAction() { model.exportPNG() }
+    @objc func handoffAction() { model.exportForAgent() }
     @objc func countdownCapture() { capture.captureAfterCountdown() }
     @objc func cancelCaptureCountdown() { capture.cancelCountdown() }
     @objc func chooseProbe() { showEditor(); capture.chooseProbe() }
     @objc func revealCaptures() { capture.revealCaptures() }
+    @objc func recoverCaptures() { capture.recoverCaptures() }
     @objc func enableShortcut() { capture.enableShortcut() }
+    @objc func checkCapturePermissions() { capture.checkPermissions() }
+    @objc func authorizeCapture() { capture.authorizeCapture() }
     @objc func undo(_ sender: Any?) { model.undo() }
     @objc func redo(_ sender: Any?) { model.redo() }
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        if menuItem.action == #selector(countdownCapture) || menuItem.action == #selector(chooseProbe) { return !capture.isCapturing && capture.countdown == nil }
+        if [#selector(countdownCapture), #selector(chooseProbe), #selector(checkCapturePermissions), #selector(authorizeCapture)].contains(menuItem.action) { return !capture.isBusy && capture.countdown == nil }
         if menuItem.action == #selector(cancelCaptureCountdown) { return capture.countdown != nil }
+        if menuItem.action == #selector(recoverCaptures) || menuItem.action == #selector(enableShortcut) { return !capture.isBusy }
         if menuItem.action == #selector(undo(_:)) { return !model.undoHistory.isEmpty }
         if menuItem.action == #selector(redo(_:)) { return !model.redoHistory.isEmpty }
+        if menuItem.action == #selector(handoffAction) { return model.project != nil && !model.isExportingHandoff }
         if [#selector(saveAction), #selector(saveAsAction), #selector(exportAction)].contains(menuItem.action) { return model.project != nil }
         return true
     }
@@ -138,9 +191,12 @@ struct EditorRootView: View {
                 Text("OneShot").font(.system(size: 20, weight: .bold, design: .rounded))
                 Text("标注工作台").foregroundStyle(.secondary)
                 Spacer()
+                recentCapturesMenu
                 Button("打开…", systemImage: "folder", action: model.openPanel)
                 Button("保存项目", systemImage: "square.and.arrow.down") { model.save() }.disabled(model.project == nil)
                 Button("导出 PNG", systemImage: "square.and.arrow.up", action: model.exportPNG).disabled(model.project == nil)
+                Button(model.isExportingHandoff ? "正在整理…" : "交给 Agent", systemImage: "paperplane", action: model.exportForAgent)
+                    .buttonStyle(.borderedProminent).disabled(model.project == nil || model.isExportingHandoff)
             }.padding(18)
             Divider()
             HStack(spacing: 12) {
@@ -148,6 +204,8 @@ struct EditorRootView: View {
                 else { Image(systemName: "viewfinder").foregroundStyle(.secondary) }
                 VStack(alignment: .leading, spacing: 3) {
                     Text(capture.message).font(.caption).textSelection(.enabled).lineLimit(3)
+                    if let report = capture.lastPermissionReport { Text(report).font(.caption2).foregroundStyle(.secondary) }
+                    if let timing = capture.lastTimingSummary { Text(timing).font(.caption2).foregroundStyle(.secondary) }
                     if let ready = capture.pending.first {
                         HStack {
                             Text("\(capture.pending.count) 份新采集待打开").font(.caption).foregroundStyle(.secondary)
@@ -157,12 +215,15 @@ struct EditorRootView: View {
                 }
                 Spacer()
                 Button("3 秒后采集") { capture.captureAfterCountdown() }
-                    .disabled(capture.isCapturing || capture.countdown != nil)
+                    .disabled(capture.isBusy || capture.countdown != nil)
                 Menu("采集设置") {
                     Text("快捷键：\(GlobalCaptureHotKey.displayString)")
-                    Button("重新启用快捷键", action: capture.enableShortcut)
-                    Button("选择采集组件…", action: capture.chooseProbe).disabled(capture.isCapturing)
+                    Button("检查采集权限", action: capture.checkPermissions).disabled(capture.isBusy || capture.countdown != nil)
+                    Button("授权采集组件…", action: capture.authorizeCapture).disabled(capture.isBusy || capture.countdown != nil)
+                    Button("重新启用快捷键", action: capture.enableShortcut).disabled(capture.isBusy)
+                    Button("选择采集组件…", action: capture.chooseProbe).disabled(capture.isBusy)
                     Button("打开采集目录", action: capture.revealCaptures)
+                    Button("检查已完成的采集", action: capture.recoverCaptures).disabled(capture.isBusy)
                 }.fixedSize()
             }.padding(.horizontal, 18).padding(.vertical, 10)
             Divider()
@@ -201,16 +262,62 @@ struct EditorRootView: View {
                     Text("打开一次已保存的采集，用编号、箭头和文字表达想法。\n标注可以修改，原始截图与上下文会一起保留。")
                         .multilineTextAlignment(.center).foregroundStyle(.secondary)
                     Button("打开采集或项目…", action: model.openPanel).buttonStyle(.borderedProminent).controlSize(.large)
+                    HStack {
+                        Button("检查采集权限", action: capture.checkPermissions)
+                        Button("授权采集组件…", action: capture.authorizeCapture)
+                    }.disabled(capture.isBusy || capture.countdown != nil)
+                    if !model.recentCaptures.isEmpty {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("最近采集").font(.headline)
+                            ForEach(model.recentCaptures.prefix(4)) { item in
+                                Button { model.openRecent(item) } label: {
+                                    HStack {
+                                        Image(systemName: item.isProject ? "pencil.and.outline" : "photo")
+                                        Text((item.isProject ? "项目 · " : "采集 · ") + item.title).lineLimit(1)
+                                        Spacer()
+                                        Text(item.capturedAt, style: .time).foregroundStyle(.secondary)
+                                    }.frame(width: 460)
+                                }.disabled(!item.isAvailable)
+                            }
+                        }.padding(.top, 12)
+                    }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             Divider()
             HStack {
                 Circle().fill(model.isDirty ? Color.orange : Color.green).frame(width: 6, height: 6)
                 Text(model.status).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                if let error = model.recentError {
+                    Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange).help(error)
+                }
                 Spacer()
                 if let document = model.document { Text("\(document.items.count) 个标注").font(.caption).foregroundStyle(.secondary) }
             }.padding(.horizontal, 16).padding(.vertical, 9)
-        }.frame(minWidth: 900, minHeight: 580)
+        }.frame(minWidth: 1080, minHeight: 580)
+            .sheet(isPresented: $model.handoffPresented) { AgentHandoffView(model: model) }
+    }
+
+    var recentCapturesMenu: some View {
+        Menu("最近采集") {
+            if model.recentCaptures.isEmpty { Text("尚无最近采集") }
+            ForEach(model.recentCaptures) { item in
+                Button { model.openRecent(item) } label: {
+                    Text((item.isProject ? "项目 · " : "采集 · ") + String(item.title.prefix(45)) + " · "
+                        + item.capturedAt.formatted(date: .numeric, time: .standard)
+                        + (item.isAvailable ? "" : "（已移动或不可用）"))
+                }.disabled(!item.isAvailable)
+            }
+            Divider()
+            Button("刷新列表", action: model.refreshRecents)
+            if model.recentCaptures.contains(where: { !$0.isAvailable }) {
+                Menu("移除失效记录") {
+                    ForEach(model.recentCaptures.filter { !$0.isAvailable }) { item in
+                        Button(String(item.title.prefix(60))) { model.removeRecent(item) }
+                    }
+                }
+            }
+            if let error = model.recentError { Text(error) }
+        }.fixedSize()
     }
 
     func toolButton(_ tool: EditorTool, _ title: String, _ icon: String) -> some View {
@@ -256,11 +363,10 @@ struct EditorRootView: View {
                         Button("在控件树中查看") { model.highlightedElementID = nodeID; model.elementSearch = nodeID; model.inspectorMode = "elements" }
                     }
                 }
-                if selected.kind == .text || selected.kind == .element {
-                    TextField("文字说明", text: Binding(get: { model.selected?.text ?? "" }, set: { text in
-                        model.updateSelected({ $0.text = text }, group: "text-\(selected.id)")
-                    }), axis: .vertical).lineLimit(2...6).textFieldStyle(.roundedBorder).accessibilityLabel("标注文字")
-                }
+                if selected.kind != .text { Text("修改意见").font(.caption).foregroundStyle(.secondary) }
+                TextField("文字说明", text: Binding(get: { model.selected?.text ?? "" }, set: { text in
+                    model.updateSelected({ $0.text = text }, group: "text-\(selected.id)")
+                }), axis: .vertical).lineLimit(2...6).textFieldStyle(.roundedBorder).accessibilityLabel("标注文字")
                 if selected.kind == .number {
                     Stepper("编号 \(selected.number)", value: Binding(get: { model.selected?.number ?? 1 }, set: { value in model.updateSelected { $0.number = value } }), in: 1...999)
                 }
@@ -285,7 +391,7 @@ struct EditorRootView: View {
                     }
                 }
             }
-            Text("保存项目后可继续修改。\n导出 PNG 得到合成后的图片。")
+            Text("保存项目后可继续修改。\n“交给 Agent”导出截图、说明和完整上下文。")
                 .font(.caption).foregroundStyle(.secondary)
             }
         }.padding(16).frame(maxHeight: .infinity, alignment: .top)

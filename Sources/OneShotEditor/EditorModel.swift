@@ -20,9 +20,25 @@ final class EditorModel: ObservableObject {
     @Published var expandedElements: Set<String> = []
     @Published private(set) var undoHistory: [[AnnotationItem]] = []
     @Published private(set) var redoHistory: [[AnnotationItem]] = []
+    @Published private(set) var recentCaptures: [RecentCapture] = []
+    @Published private(set) var recentError: String?
+    @Published private(set) var isExportingHandoff = false
+    @Published private(set) var handoff: AgentHandoffExport?
+    @Published var handoffPresented = false
+    private let recentStore: RecentCapturesStore
     private var savedItems: [AnnotationItem] = []
     private var editGroup: String?
     weak var window: NSWindow?
+
+    init(arguments: [String] = CommandLine.arguments) {
+        if let flag = arguments.firstIndex(of: "--recent-index"), arguments.indices.contains(flag + 1),
+           arguments[flag + 1].hasPrefix("/") {
+            recentStore = RecentCapturesStore(fileURL: URL(fileURLWithPath: arguments[flag + 1]))
+        } else {
+            recentStore = RecentCapturesStore()
+        }
+        refreshRecents()
+    }
 
     var document: AnnotationDocument? { project?.document }
     var selected: AnnotationItem? { document?.items.first { $0.id == selectedID } }
@@ -117,6 +133,7 @@ final class EditorModel: ObservableObject {
             catch { elementIndex = CapturedElementIndex(elements: [], status: "无法读取控件树：\(error.localizedDescription)") }
             expandedElements = Set(elementIndex?.elements.filter { $0.depth < 3 }.map(\.id) ?? [])
             status = "\(loaded.document.imageWidth) × \(loaded.document.imageHeight) · 截图与原始上下文已载入"
+            remember(loaded)
             updateWindow()
             return true
         } catch { show(error); return false }
@@ -138,6 +155,7 @@ final class EditorModel: ObservableObject {
                 project = try AnnotationStore.createProject(from: current, document: current.document, at: destination)
             }
             savedItems = current.document.items; editGroup = nil; status = "已保存 \(project?.projectDirectory?.lastPathComponent ?? title)"
+            if let project { remember(project) }
             updateWindow(); return true
         } catch { show(error); return false }
     }
@@ -158,6 +176,70 @@ final class EditorModel: ObservableObject {
             try AnnotationRenderer.exportPNG(imageURL: current.imageURL, document: current.document, to: destination)
             status = "已导出 \(destination.lastPathComponent)"
         } catch { show(error) }
+    }
+
+    func exportForAgent() {
+        guard project != nil, !isExportingHandoff else { return }
+        // Commit an in-progress native text edit before taking the immutable export snapshot.
+        window?.makeFirstResponder(nil)
+        guard let current = project else { return }
+        let panel = NSSavePanel()
+        panel.title = "交给 Agent"
+        panel.message = "导出当前截图、\(current.document.items.count) 条标注及完整上下文，并复制给 Agent 的说明。包含当前未保存的标注。"
+        panel.nameFieldStringValue = title + "-agent"
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        isExportingHandoff = true
+        status = "正在整理截图、标注和完整上下文…"
+        Task {
+            do {
+                let exported = try await Task.detached(priority: .userInitiated) {
+                    try AgentHandoffStore.export(project: current, to: destination)
+                }.value
+                isExportingHandoff = false
+                handoff = exported
+                copyHandoffPrompt()
+                handoffPresented = true
+            } catch {
+                isExportingHandoff = false
+                show(error)
+            }
+        }
+    }
+
+    func copyHandoffPrompt() {
+        guard let handoff else { return }
+        NSPasteboard.general.clearContents()
+        if NSPasteboard.general.setString(handoff.prompt, forType: .string) {
+            status = "Agent 材料已导出，说明已复制。粘贴给可读取本地文件的 Agent 即可。"
+        } else {
+            status = "材料已导出，复制失败；可在交付窗口选择并复制说明。"
+        }
+    }
+
+    func refreshRecents() {
+        do { recentCaptures = try recentStore.load(); recentError = nil }
+        catch { recentError = error.localizedDescription }
+    }
+
+    @discardableResult func remember(_ directory: URL) -> Bool {
+        do { recentCaptures = try recentStore.record(directory: directory); recentError = nil; return true }
+        catch { recentError = error.localizedDescription; return false }
+    }
+
+    @discardableResult func remember(_ project: AnnotationProject) -> Bool {
+        do { recentCaptures = try recentStore.record(project: project); recentError = nil; return true }
+        catch { recentError = error.localizedDescription; return false }
+    }
+
+    func openRecent(_ capture: RecentCapture) {
+        guard confirmUnsaved() else { return }
+        open(capture.directory)
+    }
+
+    func removeRecent(_ capture: RecentCapture) {
+        do { recentCaptures = try recentStore.remove(id: capture.id); recentError = nil }
+        catch { recentError = error.localizedDescription }
     }
 
     func confirmUnsaved() -> Bool {
