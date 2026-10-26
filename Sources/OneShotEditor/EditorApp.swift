@@ -42,6 +42,11 @@ final class EditorDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         if let flag = arguments.firstIndex(of: "--capture"), arguments.indices.contains(flag + 1) {
             model.open(URL(fileURLWithPath: arguments[flag + 1]))
         }
+        capture.beginPermissionOnboarding()
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        capture.refreshPermissionsAfterActivation()
     }
 
     func application(_ sender: NSApplication, openFiles filenames: [String]) {
@@ -76,8 +81,8 @@ final class EditorDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         menu.addItem(status); captureStatusItem = status
         add(menu, "打开采集目录", #selector(revealCaptures), "")
         add(menu, "检查已完成的采集", #selector(recoverCaptures), "")
+        add(menu, "权限与首次使用…", #selector(showPermissionGuide), "")
         add(menu, "检查采集权限", #selector(checkCapturePermissions), "")
-        add(menu, "授权采集组件…", #selector(authorizeCapture), "")
         add(menu, "选择采集组件…", #selector(chooseProbe), "")
         add(menu, "重新启用快捷键", #selector(enableShortcut), "")
         menu.addItem(.separator())
@@ -105,8 +110,8 @@ final class EditorDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         appMenu.addItem(withTitle: "退出 OneShot", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let file = NSMenuItem(); file.title = "文件"; file.submenu = NSMenu(title: "文件"); bar.addItem(file)
         add(file.submenu!, "3 秒后采集当前应用", #selector(countdownCapture), "")
+        add(file.submenu!, "权限与首次使用…", #selector(showPermissionGuide), "")
         add(file.submenu!, "检查采集权限", #selector(checkCapturePermissions), "")
-        add(file.submenu!, "授权采集组件…", #selector(authorizeCapture), "")
         file.submenu!.addItem(.separator())
         add(file.submenu!, "打开…", #selector(openAction), "o")
         add(file.submenu!, "保存", #selector(saveAction), "s")
@@ -166,16 +171,17 @@ final class EditorDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     @objc func recoverCaptures() { capture.recoverCaptures() }
     @objc func enableShortcut() { capture.enableShortcut() }
     @objc func checkCapturePermissions() { capture.checkPermissions() }
-    @objc func authorizeCapture() { capture.authorizeCapture() }
+    @objc func showPermissionGuide() { showEditor(); capture.showPermissionGuide() }
     @objc func undo(_ sender: Any?) { model.undo() }
     @objc func redo(_ sender: Any?) { model.redo() }
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        if [#selector(countdownCapture), #selector(chooseProbe), #selector(checkCapturePermissions), #selector(authorizeCapture)].contains(menuItem.action) { return !capture.isBusy && capture.countdown == nil }
+        if menuItem.action == #selector(showPermissionGuide) { return !model.handoffPresented && !model.isExportingHandoff && !capture.isCapturing }
+        if [#selector(countdownCapture), #selector(chooseProbe), #selector(checkCapturePermissions)].contains(menuItem.action) { return !capture.isBusy && capture.countdown == nil && !capture.isShowingPermissionGuide }
         if menuItem.action == #selector(cancelCaptureCountdown) { return capture.countdown != nil }
         if menuItem.action == #selector(recoverCaptures) || menuItem.action == #selector(enableShortcut) { return !capture.isBusy }
         if menuItem.action == #selector(undo(_:)) { return !model.undoHistory.isEmpty }
         if menuItem.action == #selector(redo(_:)) { return !model.redoHistory.isEmpty }
-        if menuItem.action == #selector(handoffAction) { return model.project != nil && !model.isExportingHandoff }
+        if menuItem.action == #selector(handoffAction) { return model.project != nil && !model.isExportingHandoff && !capture.isShowingPermissionGuide }
         if [#selector(saveAction), #selector(saveAsAction), #selector(exportAction)].contains(menuItem.action) { return model.project != nil }
         return true
     }
@@ -196,7 +202,7 @@ struct EditorRootView: View {
                 Button("保存项目", systemImage: "square.and.arrow.down") { model.save() }.disabled(model.project == nil)
                 Button("导出 PNG", systemImage: "square.and.arrow.up", action: model.exportPNG).disabled(model.project == nil)
                 Button(model.isExportingHandoff ? "正在整理…" : "交给 Agent", systemImage: "paperplane", action: model.exportForAgent)
-                    .buttonStyle(.borderedProminent).disabled(model.project == nil || model.isExportingHandoff)
+                    .buttonStyle(.borderedProminent).disabled(model.project == nil || model.isExportingHandoff || capture.isShowingPermissionGuide)
             }.padding(18)
             Divider()
             HStack(spacing: 12) {
@@ -218,8 +224,8 @@ struct EditorRootView: View {
                     .disabled(capture.isBusy || capture.countdown != nil)
                 Menu("采集设置") {
                     Text("快捷键：\(GlobalCaptureHotKey.displayString)")
+                    Button("权限与首次使用…", action: capture.showPermissionGuide)
                     Button("检查采集权限", action: capture.checkPermissions).disabled(capture.isBusy || capture.countdown != nil)
-                    Button("授权采集组件…", action: capture.authorizeCapture).disabled(capture.isBusy || capture.countdown != nil)
                     Button("重新启用快捷键", action: capture.enableShortcut).disabled(capture.isBusy)
                     Button("选择采集组件…", action: capture.chooseProbe).disabled(capture.isBusy)
                     Button("打开采集目录", action: capture.revealCaptures)
@@ -257,15 +263,19 @@ struct EditorRootView: View {
                 }
             } else {
                 VStack(spacing: 18) {
-                    Image(systemName: "rectangle.and.pencil.and.ellipsis").font(.system(size: 52)).foregroundStyle(.tint)
-                    Text("让重点一眼可见").font(.title2.bold())
-                    Text("打开一次已保存的采集，用编号、箭头和文字表达想法。\n标注可以修改，原始截图与上下文会一起保留。")
+                    Image(systemName: "viewfinder").font(.system(size: 52)).foregroundStyle(.tint)
+                    Text("把画面和你的意见，一起交给 Agent").font(.title2.bold())
+                    Text("切到目标应用，按 ⌃⌥⌘S 采集窗口。\n点选控件、填写说明，再导出截图和完整上下文。")
                         .multilineTextAlignment(.center).foregroundStyle(.secondary)
-                    Button("打开采集或项目…", action: model.openPanel).buttonStyle(.borderedProminent).controlSize(.large)
-                    HStack {
-                        Button("检查采集权限", action: capture.checkPermissions)
-                        Button("授权采集组件…", action: capture.authorizeCapture)
-                    }.disabled(capture.isBusy || capture.countdown != nil)
+                    if capture.permissionStatus?.allGranted != true {
+                        VStack(spacing: 8) {
+                            Text("首次采集需要开启屏幕录制与辅助功能权限。")
+                                .font(.subheadline).foregroundStyle(.secondary)
+                            Button("设置采集权限", action: capture.showPermissionGuide)
+                                .buttonStyle(.borderedProminent).controlSize(.large)
+                        }
+                    }
+                    Button("打开已有采集或项目…", action: model.openPanel).buttonStyle(.bordered).controlSize(.large)
                     if !model.recentCaptures.isEmpty {
                         VStack(alignment: .leading, spacing: 6) {
                             Text("最近采集").font(.headline)
@@ -295,6 +305,7 @@ struct EditorRootView: View {
             }.padding(.horizontal, 16).padding(.vertical, 9)
         }.frame(minWidth: 1080, minHeight: 580)
             .sheet(isPresented: $model.handoffPresented) { AgentHandoffView(model: model) }
+            .sheet(isPresented: $capture.isShowingPermissionGuide) { PermissionOnboardingView(capture: capture) }
     }
 
     var recentCapturesMenu: some View {

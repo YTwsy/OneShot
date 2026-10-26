@@ -19,6 +19,10 @@ final class CaptureController: ObservableObject {
     @Published private(set) var isCheckingPermissions = false
     @Published private(set) var isLaunchingAuthorization = false
     @Published private(set) var lastPermissionReport: String?
+    @Published private(set) var permissionStatus: CapturePermissionStatus?
+    @Published private(set) var permissionCheckError: String?
+    @Published var isShowingPermissionGuide = false
+    @Published private(set) var authorizationInFlight: CapturePermissionKind?
     @Published private(set) var pending: [ReadyCapture] = []
     @Published private(set) var probeURL: URL
     let outputRoot: URL
@@ -31,6 +35,12 @@ final class CaptureController: ObservableObject {
     private let service = ProbeCaptureService()
     private let hud = CaptureHUD()
     private var countdownTask: Task<Void, Never>?
+    private var permissionRequestTask: Task<Void, Never>?
+    private var permissionRefreshTask: Task<Void, Never>?
+    private var hasBegunPermissionOnboarding = false
+    private var lastPermissionCheck = Date.distantPast
+    private static let guideCompletionKey = "permissionGuideCompleted.v1"
+    private var permissionGuideState = PermissionGuideState(previouslyCompleted: false)
 
     init(model: EditorModel, arguments: [String] = CommandLine.arguments) {
         self.model = model
@@ -44,6 +54,8 @@ final class CaptureController: ObservableObject {
             applicationBundleIdentifier: Bundle.main.bundleIdentifier, explicitURL: option("--probe-app"),
             savedDevelopmentURL: UserDefaults.standard.string(forKey: "captureProbePath").map { URL(fileURLWithPath: $0, isDirectory: true) })
         outputRoot = option("--capture-root") ?? ProbeCaptureService.defaultOutputRoot
+        permissionGuideState = PermissionGuideState(previouslyCompleted:
+            UserDefaults.standard.bool(forKey: Self.guideCompletionKey))
     }
 
     var isBusy: Bool { isCapturing || isCheckingPermissions || isLaunchingAuthorization }
@@ -62,10 +74,14 @@ final class CaptureController: ObservableObject {
         }
     }
 
-    func stop() { countdownTask?.cancel(); hotKey.unregister(); hud.hide() }
+    func stop() {
+        countdownTask?.cancel(); permissionRequestTask?.cancel(); permissionRefreshTask?.cancel()
+        hotKey.unregister(); hud.hide()
+    }
 
     func captureFrontmost() {
         guard !isBusy else { return }
+        guard capturePermissionsReady() else { return }
         countdownTask?.cancel(); countdownTask = nil; countdown = nil
         let triggerClock = DispatchTime.now().uptimeNanoseconds
         isCapturing = true
@@ -184,6 +200,7 @@ final class CaptureController: ObservableObject {
 
     func captureAfterCountdown() {
         guard !isBusy, countdown == nil else { return }
+        guard capturePermissionsReady() else { return }
         countdown = 3
         message = "3 秒后采集，请切到目标应用。"
         hideEditor()
@@ -224,42 +241,153 @@ final class CaptureController: ObservableObject {
         do {
             try ProbeCaptureService.validateProbe(at: url)
             probeURL = url
+            permissionStatus = nil; lastPermissionReport = nil
+            permissionGuideState.invalidate(presentIfMissing: false)
             if !usesEmbeddedCapture { UserDefaults.standard.set(url.path, forKey: "captureProbePath") }
             message = "采集组件已连接。切到目标应用，按 \(GlobalCaptureHotKey.displayString)。"
         } catch { message = error.localizedDescription }
     }
 
     func checkPermissions() {
+        performPermissionCheck(activateEditor: true)
+    }
+
+    func beginPermissionOnboarding() {
+        guard !hasBegunPermissionOnboarding else { return }
+        hasBegunPermissionOnboarding = true
+        // The fixed development Probe can predate machine-readable doctor reports.
+        // Installed products always contain the matching helper and check on launch.
+        guard usesEmbeddedCapture else { return }
+        isShowingPermissionGuide = permissionGuideState.isPresented && !model.handoffPresented
+        performPermissionCheck(activateEditor: false)
+    }
+
+    func refreshPermissionsAfterActivation() {
+        guard hasBegunPermissionOnboarding, usesEmbeddedCapture else { return }
+        permissionRefreshTask?.cancel()
+        permissionRefreshTask = Task {
+            do { try await Task.sleep(for: .milliseconds(350)) } catch { return }
+            guard !Task.isCancelled, !self.isBusy, self.countdown == nil,
+                  !self.model.handoffPresented, !self.model.isExportingHandoff,
+                  Date().timeIntervalSince(self.lastPermissionCheck) >= 1 else { return }
+            self.performPermissionCheck(activateEditor: false)
+        }
+    }
+
+    func showPermissionGuide() {
+        guard !isCapturing, !model.handoffPresented, !model.isExportingHandoff else { return }
+        cancelActiveCountdown()
+        permissionGuideState.show()
+        isShowingPermissionGuide = true
+        showEditor()
+        if !isBusy { performPermissionCheck(activateEditor: false) }
+    }
+
+    func skipPermissionGuide() {
+        permissionGuideState.skip()
+        isShowingPermissionGuide = false
+        message = "可先打开已有采集或项目；开始新采集前需要完成权限设置。"
+    }
+
+    func finishPermissionGuide() {
+        guard permissionStatus?.allGranted == true, permissionGuideState.finish() else { return }
+        UserDefaults.standard.set(true, forKey: Self.guideCompletionKey)
+        isShowingPermissionGuide = false
+        message = "权限已就绪。切到目标应用，按 \(GlobalCaptureHotKey.displayString) 采集，或使用 3 秒倒计时。"
+    }
+
+    private func capturePermissionsReady() -> Bool {
+        if authorizationInFlight != nil {
+            message = "请先完成系统权限提示，再开始采集。"
+            showPermissionGuide()
+            return false
+        }
+        if isShowingPermissionGuide || (usesEmbeddedCapture && permissionStatus?.allGranted != true) {
+            showPermissionGuide()
+            return false
+        }
+        return true
+    }
+
+    private func cancelActiveCountdown() {
+        countdownTask?.cancel(); countdownTask = nil; countdown = nil
+    }
+
+    private func performPermissionCheck(activateEditor: Bool) {
         guard !isBusy, countdown == nil else { return }
         isCheckingPermissions = true
+        permissionCheckError = nil
+        lastPermissionCheck = Date()
         message = "正在检查采集组件的权限，不会弹出系统授权请求…"
         let selectedProbe = probeURL
         Task {
             do {
                 let status = try await service.checkPermissions(probeURL: selectedProbe, outputRoot: outputRoot)
+                guard selectedProbe == probeURL else { isCheckingPermissions = false; return }
+                permissionStatus = status
+                let mayPresent = !model.handoffPresented && !model.isExportingHandoff
+                permissionGuideState.receive(status, presentIfMissing: usesEmbeddedCapture && mayPresent)
+                if mayPresent { isShowingPermissionGuide = permissionGuideState.isPresented }
                 lastPermissionReport = status.localizedDescription
                 message = status.allGranted
                     ? "采集权限已就绪。切到目标应用，按 \(GlobalCaptureHotKey.displayString) 采集。"
-                    : "采集权限尚未齐备。请点击“授权采集组件”，在系统设置中批准 OneShot Capture，再重新检查。"
-            } catch { message = error.localizedDescription }
+                    : "请在权限引导中分别开启屏幕录制与辅助功能；若未出现系统提示，可打开对应设置。"
+            } catch {
+                permissionStatus = nil; lastPermissionReport = nil
+                permissionCheckError = error.localizedDescription
+                let mayPresent = !model.handoffPresented && !model.isExportingHandoff
+                permissionGuideState.invalidate(presentIfMissing: usesEmbeddedCapture && mayPresent)
+                if mayPresent { isShowingPermissionGuide = permissionGuideState.isPresented }
+                message = "未能读取权限状态，请重试检查或重新打开权限引导。"
+            }
             isCheckingPermissions = false
-            showEditor()
+            if activateEditor { showEditor() }
         }
     }
 
-    func authorizeCapture() {
-        guard !isBusy, countdown == nil else { return }
+    func requestPermission(_ permission: CapturePermissionKind) {
+        guard !isBusy, countdown == nil, authorizationInFlight == nil else { return }
+        guard permissionStatus?.grant(for: permission) != .granted else { return }
         isLaunchingAuthorization = true
-        message = "正在打开采集组件的系统授权入口…"
+        authorizationInFlight = permission
+        permissionCheckError = nil
+        message = "正在请求\(permission.displayName)…请在系统提示中操作。"
         let selectedProbe = probeURL
-        Task {
+        permissionRequestTask = Task {
             do {
-                _ = try await service.requestAuthorization(probeURL: selectedProbe, outputRoot: outputRoot)
-                message = "请在系统设置中为 OneShot Capture 批准辅助功能和屏幕录制；开发版组件显示为 OneShot Probe。完成后点击“检查采集权限”。"
-                // Do not activate the editor over the System Settings consent workflow.
-            } catch { message = error.localizedDescription; showEditor() }
+                let directory = try await service.requestAuthorization(permission: permission,
+                    probeURL: selectedProbe, outputRoot: outputRoot)
+                isLaunchingAuthorization = false
+                message = "已请求\(permission.displayName)。如未出现提示，请打开对应的系统设置，然后返回检查。"
+                // Receipt completion confirms only that the request ran. It never grants
+                // capture; always ask a fresh helper process for the effective TCC status.
+                while !Task.isCancelled {
+                    if let receipt = try service.authorizationCompletion(in: directory) {
+                        authorizationInFlight = nil
+                        if receipt.exitCode != 0 {
+                            permissionCheckError = receipt.error ?? "系统权限请求未完成，请打开对应设置后重试检查。"
+                        }
+                        performPermissionCheck(activateEditor: false)
+                        return
+                    }
+                    try await Task.sleep(for: .milliseconds(250))
+                }
+            } catch is CancellationError {
+                // Closing the editor does not kill a helper with an active system prompt.
+            } catch {
+                permissionCheckError = error.localizedDescription
+                message = "未能完成权限请求，请打开对应设置后重试检查。"
+            }
             isLaunchingAuthorization = false
+            authorizationInFlight = nil
         }
+    }
+
+    func openPermissionSettings(_ permission: CapturePermissionKind) {
+        let opened = NSWorkspace.shared.open(permission.settingsURL)
+            || NSWorkspace.shared.open(permission.settingsFallbackURL)
+        message = "请在\(permission.settingsPathDescription)中开启 OneShot（或 OneShot Capture，以系统显示为准），然后返回检查。"
+        if !opened { permissionCheckError = "无法打开系统设置，请手动前往\(permission.settingsPathDescription)。" }
     }
 
     func revealCaptures() {

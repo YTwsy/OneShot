@@ -54,11 +54,11 @@ def bundle_metadata(version: str, build_number: str, commit: str, capture: bool 
         "OneShotSourceCommit": commit,
         "OneShotDistributionChannel": "prerelease",
         "OneShotSigningStatus": "ad-hoc-unnotarized",
+        "NSScreenCaptureUsageDescription": "OneShot captures only the application window you select, so you can annotate the screenshot and share its interface context with an Agent.",
     }
     if capture:
         result.update({
             "LSUIElement": True,
-            "NSScreenCaptureUsageDescription": "OneShot captures the window you explicitly select, and saves its screenshot and interface context locally for annotation and Agent handoff.",
         })
     else:
         result["CFBundleDocumentTypes"] = [{

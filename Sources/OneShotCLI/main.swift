@@ -11,7 +11,7 @@ struct Arguments {
     init(_ raw: [String]) throws {
         command = raw.first ?? "help"
         let booleanOptions: Set<String> = ["--ocr", "--no-image", "--help", "--enable-electron-ax"]
-        let valueOptions: Set<String> = ["--app", "--window-id", "--output", "--capture", "--image", "--timeout", "--max-nodes", "--max-depth", "--max-text-characters", "--completion-file", "--working-directory"]
+        let valueOptions: Set<String> = ["--app", "--window-id", "--output", "--capture", "--image", "--timeout", "--max-nodes", "--max-depth", "--max-text-characters", "--completion-file", "--working-directory", "--permission"]
         var index = 1
         while index < raw.count {
             let key = raw[index]
@@ -79,6 +79,86 @@ private final class CaptureTelemetry {
     private func publish() { try? writer?.write(snapshot) }
 }
 
+@MainActor
+private final class AuthorizationDelegate: NSObject, NSApplicationDelegate {
+    let permissions: [CapturePermissionKind]
+    let store: SnapshotStore?
+    private let startedAt = Date()
+    private(set) var failure: Error?
+
+    init(permissions: [CapturePermissionKind], store: SnapshotStore?) {
+        self.permissions = permissions; self.store = store
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Consent is requested only after AppKit has completed normal launch.
+        DispatchQueue.main.async { [self] in performRequests() }
+    }
+
+    private func performRequests() {
+        do {
+            try store?.write(RequestStart(schemaVersion: 1, processID: getpid(),
+                startedAt: startedAt, permissions: permissions,
+                phase: "appkit_did_finish_launching_before_request"), named: "authorization-started.json")
+            NSApp.activate(ignoringOtherApps: true)
+            var attempts: [CaptureAuthorizationAttempt] = []
+            for permission in permissions {
+                let requestedAt = Date()
+                let alreadyGranted: Bool
+                let granted: Bool
+                switch permission {
+                case .screenRecording:
+                    alreadyGranted = WindowCapture.hasScreenRecordingPermission
+                    // This is the only screen consent request. Do not replace it
+                    // with a preflight check or a status-inferred AX request.
+                    granted = alreadyGranted || CGRequestScreenCaptureAccess()
+                case .accessibility:
+                    alreadyGranted = AXIsProcessTrusted()
+                    let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+                    granted = alreadyGranted || AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
+                }
+                attempts.append(CaptureAuthorizationAttempt(permission: permission,
+                    requestedAt: requestedAt, alreadyGranted: alreadyGranted,
+                    requestInvoked: !alreadyGranted, apiReturnedGranted: granted))
+                print("\(permission.rawValue): \(granted ? "granted at API return" : "request returned without approval; check System Settings")")
+            }
+            let report = RequestReport(schemaVersion: 1, processID: getpid(), startedAt: startedAt,
+                finishedAt: Date(), attempts: attempts,
+                note: "A request API return is not a fresh post-approval check. Run doctor in a new helper after returning from System Settings. Only system permission APIs were called; no TCC database reset or edit was performed.")
+            try store?.write(report, named: "authorization.json")
+            try OneShotCLI.printJSON(report)
+        } catch { failure = error }
+        fflush(nil)
+        // The system owns consent and Settings UI. Once the request API returns,
+        // don't leave an idle helper waiting five minutes for only AX permission.
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(500)) {
+            NSApp.stop(nil)
+            if let event = NSEvent.otherEvent(with: .applicationDefined, location: .zero,
+                modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil,
+                subtype: 0, data1: 0, data2: 0) {
+                NSApp.postEvent(event, atStart: true)
+            }
+        }
+    }
+
+    private struct RequestStart: Encodable {
+        let schemaVersion: Int
+        let processID: Int32
+        let startedAt: Date
+        let permissions: [CapturePermissionKind]
+        let phase: String
+    }
+
+    private struct RequestReport: Encodable {
+        let schemaVersion: Int
+        let processID: Int32
+        let startedAt: Date
+        let finishedAt: Date
+        let attempts: [CaptureAuthorizationAttempt]
+        let note: String
+    }
+}
+
 @main
 struct OneShotCLI {
     static func main() async {
@@ -101,7 +181,7 @@ struct OneShotCLI {
             switch args.flags.contains("--help") ? "help" : args.command {
             case "help", "--help", "-h": print(help)
             case "doctor": try doctor(args)
-            case "authorize": await authorize()
+            case "authorize": try authorize(args)
             case "windows":
                 let app = try args.required("--app")
                 try printJSON(WindowSelection.candidates(from: WindowCapture.listWindows(), app: app))
@@ -156,21 +236,21 @@ struct OneShotCLI {
     }
 
     @MainActor
-    static func authorize() async {
-        // This is the only command that asks macOS to display its normal consent UI.
-        // User approval in System Settings remains required; no TCC state is edited.
-        _ = NSApplication.shared
-        NSApp.setActivationPolicy(.accessory)
-        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-        let trusted = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
-        if !WindowCapture.hasScreenRecordingPermission { _ = CGRequestScreenCaptureAccess() }
-        print("Accessibility: \(trusted ? "granted" : "awaiting approval in System Settings")")
-        print("Screen Recording: \(WindowCapture.hasScreenRecordingPermission ? "granted" : "awaiting approval")")
-        // Keep the bundled app alive long enough to appear as a stable permission target.
-        let deadline = Date().addingTimeInterval(300)
-        while Date() < deadline && !AXIsProcessTrusted() {
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
-        }
+    static func authorize(_ args: Arguments) throws {
+        // Only explicit authorize commands enter the AppKit consent lifecycle.
+        // System Settings approval remains manual; doctor never calls these APIs.
+        let permissions = try CapturePermissionKind.requestedPermissions(option: args.values["--permission"])
+        let store = try args.values["--output"].map { try SnapshotStore(newDirectory: URL(fileURLWithPath: $0, isDirectory: true)) }
+        let application = NSApplication.shared
+        application.setActivationPolicy(.accessory)
+        let delegate = AuthorizationDelegate(permissions: permissions, store: store)
+        application.delegate = delegate
+        // Running AppKit lets launch registration finish and consent UI receive
+        // native events. Task.sleep alone did not provide this application lifecycle.
+        application.run()
+        application.delegate = nil
+        withExtendedLifetime(delegate) {}
+        if let error = delegate.failure { throw error }
     }
 
     static func selectedWindow(_ args: Arguments) throws -> CaptureWindow {
@@ -302,7 +382,9 @@ struct OneShotCLI {
     OneShot — macOS window context capture probe (macOS 14+)
 
     oneshot doctor
-    oneshot authorize   (explicitly opens standard macOS consent; approval remains manual)
+    oneshot authorize [--permission screen-recording|accessibility] [--output <NEW directory>]
+      Explicitly requests the selected macOS consent; approval remains manual.
+      Without --permission, requests Screen Recording then Accessibility for CLI compatibility.
     oneshot windows --app <exact bundle identifier or app name>
     oneshot diagnose --app <app> [--window-id <id>]   (read-only AX window diagnostics)
     oneshot capture --app <bundle identifier or app name> [--window-id <id>]

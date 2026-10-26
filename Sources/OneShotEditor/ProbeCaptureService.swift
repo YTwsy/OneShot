@@ -69,6 +69,9 @@ final class ProbeCaptureService {
         }
     }
     private var utilityRuns: [UtilityRun] = []
+    // Keep a bounded reference to authorization launches after doctor/pruning has
+    // removed their completed utility entries, so UI completion polling is stable.
+    private var authorizationRuns: [UtilityRun] = []
 
     /// Recover only runner-owned, fully verified captures. Delivery is acknowledged by
     /// the controller after its persistent recent-capture index has been written.
@@ -295,11 +298,13 @@ final class ProbeCaptureService {
 
     /// Only an explicit user action calls this. Return after launch, while the helper
     /// may continue waiting for System Settings; the editor never waits five minutes.
-    func requestAuthorization(probeURL: URL, outputRoot: URL? = nil) async throws -> URL {
+    func requestAuthorization(permission: CapturePermissionKind? = nil,
+                              probeURL: URL, outputRoot: URL? = nil) async throws -> URL {
         try releaseFinishedRunOrReject()
         try rejectUnfinishedUtility()
         try Self.rejectRunningProbe()
-        let run = try launchUtility(command: "authorize", probeURL: probeURL, outputRoot: outputRoot)
+        let run = try launchUtility(command: "authorize", probeURL: probeURL, outputRoot: outputRoot,
+                                   permission: permission)
         let deadline = ContinuousClock.now.advanced(by: .seconds(15))
         while ContinuousClock.now < deadline, !Task.isCancelled {
             if let error = run.launchError {
@@ -314,7 +319,37 @@ final class ProbeCaptureService {
         throw ProbeCaptureServiceError.incomplete(run.directory, run.launchError)
     }
 
-    private func launchUtility(command: String, probeURL: URL, outputRoot: URL?) throws -> UtilityRun {
+    /// Returns completion only after the explicitly launched helper exits and its
+    /// private receipt is validated. The request API result never grants permission
+    /// in the editor; a fresh doctor is still required after this returns.
+    func authorizationCompletion(in directory: URL) throws -> CommandCompletionReceipt? {
+        guard let run = authorizationRuns.last(where: {
+            $0.directory.standardizedFileURL == directory.standardizedFileURL
+        }) else {
+            throw ProbeCaptureServiceError.resultUnavailable(directory, "此授权记录不属于当前编辑器启动的请求。")
+        }
+        if FileManager.default.fileExists(atPath: run.receiptURL.path) {
+            let receipt = try Self.utilityReceipt(run)
+            utilityRuns.removeAll { $0 === run }
+            guard receipt.exitCode == 0 else {
+                throw ProbeCaptureServiceError.resultUnavailable(run.directory,
+                    receipt.error ?? "系统授权请求未能完成。")
+            }
+            return receipt
+        }
+        if let error = run.launchError, run.application == nil {
+            utilityRuns.removeAll { $0 === run }
+            throw ProbeCaptureServiceError.resultUnavailable(run.directory, "无法启动授权入口：\(error)")
+        }
+        if run.application?.isTerminated == true {
+            utilityRuns.removeAll { $0 === run }
+            throw ProbeCaptureServiceError.resultUnavailable(run.directory, "授权组件已退出，但没有完成回执。请重新检查权限状态。")
+        }
+        return nil
+    }
+
+    private func launchUtility(command: String, probeURL: URL, outputRoot: URL?,
+                               permission: CapturePermissionKind? = nil) throws -> UtilityRun {
         try Self.validateProbe(at: probeURL)
         let root = (outputRoot ?? Self.defaultOutputRoot).resolvingSymlinksInPath().standardizedFileURL
         let runsRoot = root.appendingPathComponent(".runs", isDirectory: true)
@@ -323,6 +358,10 @@ final class ProbeCaptureService {
         let store = try SnapshotStore(newDirectory: runsRoot.appendingPathComponent("\(command)-\(UUID().uuidString)", isDirectory: true))
         let run = UtilityRun(command: command, directory: store.directory)
         utilityRuns.append(run)
+        if command == "authorize" {
+            authorizationRuns.append(run)
+            if authorizationRuns.count > 8 { authorizationRuns.removeFirst(authorizationRuns.count - 8) }
+        }
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.createsNewApplicationInstance = true
         configuration.activates = false
@@ -330,6 +369,10 @@ final class ProbeCaptureService {
         configuration.allowsRunningApplicationSubstitution = false
         configuration.arguments = [command, "--completion-file", run.receiptURL.path, "--working-directory", root.path]
         if command == "doctor" { configuration.arguments += ["--output", run.directory.appendingPathComponent("report").path] }
+        if command == "authorize" {
+            configuration.arguments += ["--output", run.directory.appendingPathComponent("report").path]
+            if let permission { configuration.arguments += ["--permission", permission.rawValue] }
+        }
         NSWorkspace.shared.openApplication(at: probeURL, configuration: configuration) { application, error in
             Task { @MainActor in
                 run.application = application

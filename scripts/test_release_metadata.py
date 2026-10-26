@@ -27,6 +27,8 @@ class ReleaseMetadataTests(unittest.TestCase):
                 self.assertEqual(main["OneShotSourceCommit"], COMMIT)
                 self.assertEqual(capture["OneShotReleaseTag"], main["OneShotReleaseTag"])
                 self.assertEqual(capture["CFBundleIdentifier"], metadata.CAPTURE_ID)
+                self.assertTrue(main["NSScreenCaptureUsageDescription"])
+                self.assertEqual(capture["NSScreenCaptureUsageDescription"], main["NSScreenCaptureUsageDescription"])
 
     def test_ambiguous_or_shell_sensitive_version_and_invalid_provenance_rejected(self):
         versions = ["0.1.0", "v0.1.0-alpha.1", "01.1.0-alpha.1", "0.01.0-alpha.1",
