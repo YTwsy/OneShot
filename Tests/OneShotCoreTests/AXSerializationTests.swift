@@ -142,13 +142,18 @@ struct AXSerializationTests {
             default: unknown.size = failed
             }
             let assessment = AXCollector.assessWindowMatches([target, unknown], title: "Document", bounds: target.bounds)
-            #expect(assessment.matches == [0])
-            #expect(assessment.cannotExclude == [1])
+            if unreadAttribute == "title" {
+                #expect(assessment.matches == [0, 1])
+                #expect(assessment.cannotExclude.isEmpty)
+            } else {
+                #expect(assessment.matches == [0])
+                #expect(assessment.cannotExclude == [1])
+            }
             #expect(assessment.uniqueMatchIndex == nil)
         }
     }
 
-    @Test func differentKnownTitleExcludesWindowWithUnreadBounds() {
+    @Test func differentKnownTitleCannotExcludeWindowWithUnreadBounds() {
         let target = windowCandidate(title: "Document")
         var other = windowCandidate(title: "Different document")
         other.position.status = "cannot_complete"
@@ -156,8 +161,8 @@ struct AXSerializationTests {
         other.bounds = nil
         let assessment = AXCollector.assessWindowMatches([target, other], title: "Document", bounds: target.bounds)
         #expect(assessment.matches == [0])
-        #expect(assessment.cannotExclude.isEmpty)
-        #expect(assessment.uniqueMatchIndex == 0)
+        #expect(assessment.cannotExclude == [1])
+        #expect(assessment.uniqueMatchIndex == nil)
     }
 
     @Test func differentKnownBoundsExcludeWindowWithUnreadTitle() {

@@ -386,8 +386,33 @@ final class CaptureController: ObservableObject {
     func openPermissionSettings(_ permission: CapturePermissionKind) {
         let opened = NSWorkspace.shared.open(permission.settingsURL)
             || NSWorkspace.shared.open(permission.settingsFallbackURL)
-        message = "请在\(permission.settingsPathDescription)中开启 OneShot（或 OneShot Capture，以系统显示为准），然后返回检查。"
+        message = permission == .accessibility
+            ? "请在\(permission.settingsPathDescription)中授权 \(permissionComponentName)，然后返回检查。若开关已开启仍未生效，请查看引导中的修复步骤。"
+            : "请在\(permission.settingsPathDescription)中开启 OneShot，然后返回检查。"
         if !opened { permissionCheckError = "无法打开系统设置，请手动前往\(permission.settingsPathDescription)。" }
+    }
+
+    var permissionComponentName: String {
+        let info = Bundle(url: probeURL)?.infoDictionary
+        return (info?["CFBundleDisplayName"] as? String)
+            ?? (info?["CFBundleName"] as? String)
+            ?? probeURL.deletingPathExtension().lastPathComponent
+    }
+
+    func revealPermissionComponent() {
+        guard FileManager.default.fileExists(atPath: probeURL.path) else {
+            message = "找不到采集组件，请从安装位置重新打开 OneShot 后再试。"; return
+        }
+        NSWorkspace.shared.activateFileViewerSelecting([probeURL])
+        message = "已请求 Finder 显示当前采集组件。请在辅助功能设置中添加这个 .app。"
+    }
+
+    @discardableResult
+    func copyPermissionComponentPath() -> Bool {
+        NSPasteboard.general.clearContents()
+        let copied = NSPasteboard.general.setString(probeURL.path, forType: .string)
+        message = copied ? "已复制当前采集组件路径，可在系统设置的添加对话框中按 ⇧⌘G 后粘贴。" : "未能复制路径，请在权限引导中手动选择路径。"
+        return copied
     }
 
     func revealCaptures() {

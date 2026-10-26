@@ -97,9 +97,10 @@ private final class AuthorizationDelegate: NSObject, NSApplicationDelegate {
 
     private func performRequests() {
         do {
+            let callerIdentity = CaptureCallerIdentity.current()
             try store?.write(RequestStart(schemaVersion: 1, processID: getpid(),
                 startedAt: startedAt, permissions: permissions,
-                phase: "appkit_did_finish_launching_before_request"), named: "authorization-started.json")
+                phase: "appkit_did_finish_launching_before_request", callerIdentity: callerIdentity), named: "authorization-started.json")
             NSApp.activate(ignoringOtherApps: true)
             var attempts: [CaptureAuthorizationAttempt] = []
             for permission in permissions {
@@ -124,6 +125,7 @@ private final class AuthorizationDelegate: NSObject, NSApplicationDelegate {
             }
             let report = RequestReport(schemaVersion: 1, processID: getpid(), startedAt: startedAt,
                 finishedAt: Date(), attempts: attempts,
+                callerIdentity: callerIdentity,
                 note: "A request API return is not a fresh post-approval check. Run doctor in a new helper after returning from System Settings. Only system permission APIs were called; no TCC database reset or edit was performed.")
             try store?.write(report, named: "authorization.json")
             try OneShotCLI.printJSON(report)
@@ -147,6 +149,7 @@ private final class AuthorizationDelegate: NSObject, NSApplicationDelegate {
         let startedAt: Date
         let permissions: [CapturePermissionKind]
         let phase: String
+        let callerIdentity: CaptureCallerIdentity
     }
 
     private struct RequestReport: Encodable {
@@ -155,6 +158,7 @@ private final class AuthorizationDelegate: NSObject, NSApplicationDelegate {
         let startedAt: Date
         let finishedAt: Date
         let attempts: [CaptureAuthorizationAttempt]
+        let callerIdentity: CaptureCallerIdentity
         let note: String
     }
 }
@@ -220,7 +224,7 @@ struct OneShotCLI {
     }
 
     static func doctor(_ args: Arguments) throws {
-        let result: [String: String] = [
+        var result: [String: String] = [
             "os": ProcessInfo.processInfo.operatingSystemVersionString,
             "executable": Bundle.main.executableURL?.path ?? CommandLine.arguments[0],
             "accessibility": AXIsProcessTrusted() ? "granted" : "not_granted",
@@ -228,6 +232,7 @@ struct OneShotCLI {
             "permissionsRequested": "false",
             "note": "Only checks this process. No capture, prompts, settings changes, or application activation."
         ]
+        result.merge(CaptureCallerIdentity.current().doctorFields) { _, identityValue in identityValue }
         if let output = args.values["--output"] {
             let store = try SnapshotStore(newDirectory: URL(fileURLWithPath: output, isDirectory: true))
             try store.write(result, named: "doctor.json")
@@ -316,7 +321,8 @@ struct OneShotCLI {
         telemetry.finish(screenshot.status)
         telemetry.begin(.accessibility)
         do {
-            let result = try AXCollector(options: options).capture(pid: window.pid, windowTitle: window.title.isEmpty ? nil : window.title, windowBounds: window.cgRect)
+            let result = try AXCollector(options: options).capture(pid: window.pid,
+                windowTitle: window.title.isEmpty ? nil : window.title, windowBounds: window.cgRect)
             try store.write(result, named: "accessibility.json")
             context += "[Accessibility — frozen capture]\n" + result.readableText + "\n"
             accessibility = ComponentOutcome(status: result.completeness, file: "accessibility.json")

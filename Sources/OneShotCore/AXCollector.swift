@@ -707,12 +707,28 @@ public final class AXCollector {
             throw failed(.ambiguousWindowMatch, "No unique focused/single AX window could be selected.")
         }
         let assessment = Self.assessWindowMatches(windows.map { $0.1 }, title: title, bounds: bounds)
-        if let index = assessment.uniqueMatchIndex { return (windows[index].0, bounds == nil ? "exact_title" : (title == nil ? "bounds_within_3_points" : "exact_title_and_bounds_within_3_points"), diagnostic) }
+        if let index = assessment.uniqueMatchIndex {
+            if bounds != nil {
+                let candidate = windows[index].1
+                if let title, candidate.title.status == "ok", candidate.title.value?.type == "string",
+                   candidate.title.value?.truncated != true, let actual = candidate.title.value?.text {
+                    if actual != title {
+                        note("window_title_differs", "CG and AX titles differ. The window was selected by unique bounds; titles are retained in their original metadata fields.", attribute: "AXTitle")
+                    }
+                } else {
+                    note("window_title_unavailable", "CG or AX title was unavailable or incomplete. The window was selected by unique bounds; title availability did not decide selection.", attribute: "AXTitle")
+                }
+                return (windows[index].0, "unique_bounds_within_3_points", diagnostic)
+            }
+            return (windows[index].0, "exact_title", diagnostic)
+        }
         if !assessment.cannotExclude.isEmpty {
             throw failed(.uncertainWindowMatch, "\(assessment.matches.count) AX windows matched, but \(assessment.cannotExclude.count) other candidates could not be excluded because matching metadata was unavailable; refusing an uncertain choice.")
         }
         if assessment.matches.count > 1 { throw failed(.ambiguousWindowMatch, "\(assessment.matches.count) AX windows matched; refusing an arbitrary choice.") }
-        throw failed(.noMatchingWindow, "No AX window matched requested title (\(title?.count ?? 0) characters) and bounds \(String(describing: bounds)).")
+        throw failed(.noMatchingWindow, bounds != nil
+            ? "No AX window matched requested bounds \(String(describing: bounds))."
+            : "No AX window matched requested title (\(title?.count ?? 0) characters).")
     }
 
     /// An empty successful array is different from a failed/nil/malformed AXWindows read.
@@ -730,19 +746,25 @@ public final class AXCollector {
         var uniqueMatchIndex: Int? { matches.count == 1 && cannotExclude.isEmpty ? matches[0] : nil }
     }
 
-    /// A failed metadata read is unknown, never evidence that a window differs.
-    /// Any successfully read requested field can independently rule a candidate out.
+    /// Geometry identifies the selected window within this application's AX inventory.
+    /// Titles are provider-specific display text and cannot exclude a geometric candidate.
+    /// An unavailable geometry component is unknown; another valid differing component
+    /// can still rule the candidate out. Without bounds, retain exact title-only matching.
     static func assessWindowMatches(_ candidates: [AXWindowDiagnostic], title: String?, bounds: CGRect?) -> WindowMatchAssessment {
         var result = WindowMatchAssessment()
+        if let bounds {
+            guard [bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height].allSatisfy(\.isFinite),
+                  bounds.size.width > 0, bounds.size.height > 0 else {
+                result.cannotExclude = Array(candidates.indices)
+                return result
+            }
+        } else if title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+            result.cannotExclude = Array(candidates.indices)
+            return result
+        }
         for (index, candidate) in candidates.enumerated() {
             var unknown = false
             var differs = false
-            if let expected = title {
-                if candidate.title.status == "ok", candidate.title.value?.type == "string",
-                   candidate.title.value?.truncated != true, let actual = candidate.title.value?.text {
-                    differs = actual != expected
-                } else { unknown = true }
-            }
             if let expected = bounds {
                 let components: [(AXCapturedAttribute, String, String, Double)] = [
                     (candidate.position, "point", "x", expected.origin.x),
@@ -752,10 +774,17 @@ public final class AXCollector {
                 ]
                 for (attribute, type, key, expectedValue) in components {
                     if attribute.status == "ok", attribute.value?.type == type,
-                       let actual = attribute.value?.components?[key], actual.isFinite, expectedValue.isFinite {
+                       attribute.value?.truncated != true,
+                       let actual = attribute.value?.components?[key], actual.isFinite,
+                       (key != "width" && key != "height") || actual > 0 {
                         if abs(actual - expectedValue) > 3 { differs = true }
                     } else { unknown = true }
                 }
+            } else if let expected = title {
+                if candidate.title.status == "ok", candidate.title.value?.type == "string",
+                   candidate.title.value?.truncated != true, let actual = candidate.title.value?.text {
+                    differs = actual != expected
+                } else { unknown = true }
             }
             if differs { continue }
             if unknown { result.cannotExclude.append(index) }

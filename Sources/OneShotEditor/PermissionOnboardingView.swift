@@ -5,6 +5,8 @@ import OneShotCore
 /// Opening this guide never starts a capture or presents a system permission request.
 struct PermissionOnboardingView: View {
     @ObservedObject var capture: CaptureController
+    @State private var showsAccessibilityRecovery = false
+    @State private var copiedComponentPath = false
 
     private var isReady: Bool { capture.permissionCheckError == nil && capture.permissionStatus?.allGranted == true }
 
@@ -51,8 +53,7 @@ struct PermissionOnboardingView: View {
 
                     VStack(alignment: .leading, spacing: 6) {
                         Label("只会在你点击“开启”后请求系统授权，不会自动开始截图。", systemImage: "hand.raised")
-                        Text("如果系统列表显示“OneShot Capture”，它是 OneShot 的采集组件。开启权限后返回这里，应用会重新检查。")
-                        Text("没有出现系统提示时，可分别点击“前往系统设置”，找到 OneShot 或 OneShot Capture 并开启开关。")
+                        Text("没有出现系统提示时，可分别点击“前往系统设置”。开启权限后返回这里，应用会重新检查采集组件的实际权限。")
                     }.font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }.padding(.trailing, 4)
             }
@@ -110,9 +111,37 @@ struct PermissionOnboardingView: View {
             Text(kind.settingsPathDescription)
                 .font(.caption2).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            if kind == .accessibility && !granted {
+                Text("请授权 \(capture.permissionComponentName)，它是 OneShot 的采集组件。")
+                    .font(.caption).foregroundStyle(.secondary)
+                accessibilityRecovery
+            }
         }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 13))
             .overlay(RoundedRectangle(cornerRadius: 13).strokeBorder(granted ? Color.green.opacity(0.28) : Color.primary.opacity(0.09)))
+    }
+
+    private var accessibilityRecovery: some View {
+        DisclosureGroup("系统开关已开启，仍无法使用？", isExpanded: $showsAccessibilityRecovery) {
+            VStack(alignment: .leading, spacing: 9) {
+                Text("更新预发布应用后，系统可能保留旧版本的授权。此时开关看起来已开启，当前采集组件仍可能被拒绝。可以重新添加当前组件：")
+                    .foregroundStyle(.secondary)
+                Text("1. 在“辅助功能”列表选中对应的旧授权条目（通常显示 \(capture.permissionComponentName)，也可能显示 OneShot），点击减号移除。若有多项且无法确认，请先核对，不要移除其他条目。")
+                Text("2. 点击加号，再按 ⇧⌘G，粘贴下方组件路径，选择这个 .app 并开启开关。")
+                Text("3. 返回 OneShot，点击“重新检查”。若系统要求退出重开，请按提示操作。")
+                Text("当前采集组件").fontWeight(.medium)
+                Text(capture.probeURL.path).font(.system(.caption2, design: .monospaced))
+                    .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 10) {
+                    Button(copiedComponentPath ? "已复制组件路径" : "复制组件路径") {
+                        copiedComponentPath = capture.copyPermissionComponentPath()
+                    }
+                    Button("在 Finder 中显示", action: capture.revealPermissionComponent)
+                }
+                Text("只处理这一项辅助功能授权；屏幕录制和其他应用的授权无需改动。")
+                    .foregroundStyle(.secondary)
+            }.font(.caption).fixedSize(horizontal: false, vertical: true).padding(.top, 9)
+        }.font(.caption.weight(.medium))
     }
 
     private func permissionState(granted: Bool, requesting: Bool) -> some View {

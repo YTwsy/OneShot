@@ -111,6 +111,6 @@ zsh scripts/build-release.sh --version 0.1.0-alpha.1 --build-number 1 --ref HEAD
 
 ## 许可证与参考
 
-OneShot 使用 [MIT License](LICENSE)，版权所有 2026 YTwsy。
+OneShot 使用 [MIT License](LICENSE)
 
 实现独立使用 macOS 的 CoreGraphics、ScreenCaptureKit、Accessibility 与 Vision。交互和能力参考包括 [Pinpoint](https://github.com/croustibat/Pinpoint)、[开源 Appshots](https://github.com/Shahfarzane/appshots)、[Remarc](https://github.com/metedata/Remarc) 和 [Peekaboo](https://github.com/openclaw/Peekaboo)。这些链接不表示代码或资源被打包进 OneShot。OneShot 不包含或调用 Codex 的专有 AppShot 服务。
