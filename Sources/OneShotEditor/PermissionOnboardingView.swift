@@ -112,7 +112,7 @@ struct PermissionOnboardingView: View {
                 .font(.caption2).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if kind == .accessibility && !granted {
-                Text("请授权 \(capture.permissionComponentName)，它是 OneShot 的采集组件。")
+                Text("请为系统列表中的“\(capture.permissionComponentName)”开启辅助功能；它对应 OneShot 的内置采集组件。")
                     .font(.caption).foregroundStyle(.secondary)
                 accessibilityRecovery
             }
@@ -124,9 +124,9 @@ struct PermissionOnboardingView: View {
     private var accessibilityRecovery: some View {
         DisclosureGroup("系统开关已开启，仍无法使用？", isExpanded: $showsAccessibilityRecovery) {
             VStack(alignment: .leading, spacing: 9) {
-                Text("更新预发布应用后，系统可能保留旧版本的授权。此时开关看起来已开启，当前采集组件仍可能被拒绝。可以重新添加当前组件：")
+                Text("如果旧版授权未匹配当前组件，系统开关可能看起来已开启，实际检查仍被拒绝。先核对当前组件路径；确认是旧条目后，再重新添加：")
                     .foregroundStyle(.secondary)
-                Text("1. 在“辅助功能”列表选中对应的旧授权条目（通常显示 \(capture.permissionComponentName)，也可能显示 OneShot），点击减号移除。若有多项且无法确认，请先核对，不要移除其他条目。")
+                Text("1. 在“辅助功能”列表中核对当前组件，选中对应的旧授权条目后点击减号。当前名称为 \(capture.permissionComponentName)，历史条目可能仍显示 OneShot Capture。若有多项且无法确认，请先核对，不要移除其他条目。")
                 Text("2. 点击加号，再按 ⇧⌘G，粘贴下方组件路径，选择这个 .app 并开启开关。")
                 Text("3. 返回 OneShot，点击“重新检查”。若系统要求退出重开，请按提示操作。")
                 Text("当前采集组件").fontWeight(.medium)

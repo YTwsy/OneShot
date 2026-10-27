@@ -41,8 +41,13 @@ class ReleaseMetadataTests(unittest.TestCase):
                 self.assertEqual(main["OneShotReleaseTag"], "v" + version)
                 self.assertEqual(main["CFBundleVersion"], "17")
                 self.assertEqual(main["OneShotSourceCommit"], COMMIT)
+                self.assertEqual(main["CFBundleIdentifier"], "io.github.ytwsy.oneshot")
+                self.assertEqual(main["CFBundleExecutable"], "oneshot-editor")
                 self.assertEqual(capture["OneShotReleaseTag"], main["OneShotReleaseTag"])
-                self.assertEqual(capture["CFBundleIdentifier"], metadata.CAPTURE_ID)
+                self.assertEqual(capture["CFBundleIdentifier"], "io.github.ytwsy.oneshot.capture-probe")
+                self.assertEqual(capture["CFBundleExecutable"], "oneshot")
+                self.assertEqual(capture["CFBundleVersion"], main["CFBundleVersion"])
+                self.assertEqual(capture["OneShotSourceCommit"], main["OneShotSourceCommit"])
                 self.assertTrue(main["NSScreenCaptureUsageDescription"])
                 self.assertEqual(capture["NSScreenCaptureUsageDescription"], main["NSScreenCaptureUsageDescription"])
 
@@ -54,6 +59,8 @@ class ReleaseMetadataTests(unittest.TestCase):
                 metadata.write_bundle_metadata(app, "1.2.3-beta.4", "29", COMMIT, mode)
                 for bundle in [app, app / "Contents/Helpers/OneShot Capture.app"]:
                     plist = plistlib.loads((bundle / "Contents/Info.plist").read_bytes())
+                    self.assertEqual(plist["CFBundleName"], "OneShot")
+                    self.assertEqual(plist["CFBundleDisplayName"], "OneShot")
                     self.assertEqual(plist["OneShotSigningMode"], mode)
                     self.assertEqual(plist["OneShotSigningStatus"], mode + "-unnotarized")
                 report = signing_report(mode)

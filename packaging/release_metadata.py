@@ -111,7 +111,7 @@ def bundle_metadata(version: str, build_number: str, commit: str, capture: bool 
                     signing_mode: str = "ad-hoc") -> dict:
     marketing = validate(version, build_number, commit)
     validate_signing_mode(signing_mode)
-    name = "OneShot Capture" if capture else "OneShot"
+    name = "OneShot"
     result = {
         "CFBundleIdentifier": CAPTURE_ID if capture else APP_ID,
         "CFBundleName": name,

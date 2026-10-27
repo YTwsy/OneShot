@@ -233,7 +233,7 @@ final class CaptureController: ObservableObject {
         guard !isBusy, countdown == nil else { return }
         let panel = NSOpenPanel()
         panel.title = "选择 OneShot 采集组件"
-        panel.message = "选择现有 OneShot Capture.app 或开发版 OneShot Probe.app；不会重建或更改其系统授权。"
+        panel.message = "选择 OneShot 的内置采集组件，或开发版 OneShot Probe.app；不会重建或更改其系统授权。"
         panel.canChooseFiles = true; panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         panel.directoryURL = probeURL.deletingLastPathComponent()
@@ -387,8 +387,8 @@ final class CaptureController: ObservableObject {
         let opened = NSWorkspace.shared.open(permission.settingsURL)
             || NSWorkspace.shared.open(permission.settingsFallbackURL)
         message = permission == .accessibility
-            ? "请在\(permission.settingsPathDescription)中授权 \(permissionComponentName)，然后返回检查。若开关已开启仍未生效，请查看引导中的修复步骤。"
-            : "请在\(permission.settingsPathDescription)中开启 OneShot，然后返回检查。"
+            ? "请在\(permission.settingsPathDescription)中为 \(permissionComponentName) 开启权限，然后返回检查。若开关已开启仍未生效，请查看引导中的修复步骤。"
+            : "请在\(permission.settingsPathDescription)中为 OneShot 开启权限，然后返回检查。"
         if !opened { permissionCheckError = "无法打开系统设置，请手动前往\(permission.settingsPathDescription)。" }
     }
 
