@@ -393,9 +393,9 @@ final class CaptureController: ObservableObject {
     }
 
     var permissionComponentName: String {
-        let info = Bundle(url: probeURL)?.infoDictionary
-        return (info?["CFBundleDisplayName"] as? String)
-            ?? (info?["CFBundleName"] as? String)
+        let bundle = Bundle(url: probeURL)
+        return (bundle?.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+            ?? (bundle?.object(forInfoDictionaryKey: "CFBundleName") as? String)
             ?? probeURL.deletingPathExtension().lastPathComponent
     }
 

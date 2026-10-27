@@ -111,11 +111,12 @@ def bundle_metadata(version: str, build_number: str, commit: str, capture: bool 
                     signing_mode: str = "ad-hoc") -> dict:
     marketing = validate(version, build_number, commit)
     validate_signing_mode(signing_mode)
-    name = "OneShot"
+    name = "OneShot Capture" if capture else "OneShot"
     result = {
         "CFBundleIdentifier": CAPTURE_ID if capture else APP_ID,
         "CFBundleName": name,
         "CFBundleDisplayName": name,
+        "CFBundleDevelopmentRegion": "en",
         "CFBundleExecutable": "oneshot" if capture else "oneshot-editor",
         "CFBundlePackageType": "APPL",
         "CFBundleVersion": build_number,
@@ -153,6 +154,11 @@ def write_bundle_metadata(app: Path, version: str, build_number: str, commit: st
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("xb") as output:
             plistlib.dump(bundle_metadata(version, build_number, commit, capture, signing_mode), output, sort_keys=True)
+        for language in ("en", "zh-Hans"):
+            localized = bundle / "Contents/Resources" / (language + ".lproj") / "InfoPlist.strings"
+            localized.parent.mkdir(parents=True, exist_ok=True)
+            with localized.open("x", encoding="utf-16") as output:
+                output.write('"CFBundleName" = "OneShot";\n"CFBundleDisplayName" = "OneShot";\n')
 
 
 def write_manifest(directory: Path, version: str, build_number: str, commit: str,

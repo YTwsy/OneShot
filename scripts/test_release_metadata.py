@@ -57,10 +57,16 @@ class ReleaseMetadataTests(unittest.TestCase):
                 root = Path(temporary)
                 app = root / "OneShot.app"
                 metadata.write_bundle_metadata(app, "1.2.3-beta.4", "29", COMMIT, mode)
-                for bundle in [app, app / "Contents/Helpers/OneShot Capture.app"]:
+                for bundle, technical_name in [(app, "OneShot"),
+                                                (app / "Contents/Helpers/OneShot Capture.app", "OneShot Capture")]:
                     plist = plistlib.loads((bundle / "Contents/Info.plist").read_bytes())
-                    self.assertEqual(plist["CFBundleName"], "OneShot")
-                    self.assertEqual(plist["CFBundleDisplayName"], "OneShot")
+                    self.assertEqual(plist["CFBundleName"], technical_name)
+                    self.assertEqual(plist["CFBundleDisplayName"], technical_name)
+                    self.assertEqual(plist["CFBundleDevelopmentRegion"], "en")
+                    for language in ("en", "zh-Hans"):
+                        localized = bundle / "Contents/Resources" / (language + ".lproj") / "InfoPlist.strings"
+                        self.assertEqual(localized.read_text(encoding="utf-16"),
+                                         '"CFBundleName" = "OneShot";\n"CFBundleDisplayName" = "OneShot";\n')
                     self.assertEqual(plist["OneShotSigningMode"], mode)
                     self.assertEqual(plist["OneShotSigningStatus"], mode + "-unnotarized")
                 report = signing_report(mode)
@@ -72,6 +78,18 @@ class ReleaseMetadataTests(unittest.TestCase):
                 self.assertFalse(manifest["notarized"])
                 self.assertEqual(manifest["permissionContinuity"], "not-verified")
                 self.assertEqual(manifest["signingReport"], report)
+
+    def test_localized_name_files_do_not_replace_existing_resources(self):
+        for relative in ("Contents/Resources/en.lproj/InfoPlist.strings",
+                         "Contents/Helpers/OneShot Capture.app/Contents/Resources/zh-Hans.lproj/InfoPlist.strings"):
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as temporary:
+                app = Path(temporary) / "OneShot.app"
+                existing = app / relative
+                existing.parent.mkdir(parents=True)
+                existing.write_bytes(b"existing resource")
+                with self.assertRaises(FileExistsError):
+                    metadata.write_bundle_metadata(app, "0.1.0-alpha.1", "8", COMMIT)
+                self.assertEqual(existing.read_bytes(), b"existing resource")
 
     def test_certificate_modes_need_complete_identity_evidence_and_reject_mismatches(self):
         valid = signing_report("developer-id")
