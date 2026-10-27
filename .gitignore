@@ -8,3 +8,8 @@ Edits/
 Ref/
 __pycache__/
 *.pyc
+.signing/
+*.p12
+*.pfx
+*.key
+*.keychain-db

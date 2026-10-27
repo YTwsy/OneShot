@@ -1,0 +1,268 @@
+name: Signed preview build
+
+# This workflow packages a fixed, previously exported identity. It never creates
+# certificates, publishes a Release, or changes a user's macOS privacy grants.
+# Self-signed mode uses a fixed root certificate and an exact certificate-pinned DR.
+# Temporary keychain lookup is configured without changing certificate trust.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Preview version (for example 0.1.0-alpha.1)
+        required: true
+        default: 0.1.0-alpha.1
+        type: string
+      build_number:
+        description: Numeric bundle build number
+        required: true
+        default: '1'
+        type: string
+      signing_mode:
+        description: Reusable certificate mode; self-signed uses a fixed root and pinned identity
+        required: true
+        default: developer-id
+        type: choice
+        options:
+          - developer-id
+          - apple-development
+          - self-signed
+      baseline_run_id:
+        description: Optional successful run of this workflow to compare component code requirements
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: oneshot-signed-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # Only reviewed code on the default branch can receive environment secrets.
+    if: github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: macos-15
+    timeout-minutes: 45
+    # Configure required reviewers and a default-branch deployment rule in GitHub.
+    environment: signing
+    defaults:
+      run:
+        shell: zsh {0}
+    env:
+      ONESHOT_RELEASE_VERSION: ${{ inputs.version }}
+      ONESHOT_BUILD_NUMBER: ${{ inputs.build_number }}
+      ONESHOT_SIGNING_MODE: ${{ inputs.signing_mode }}
+      ONESHOT_BASELINE_RUN_ID: ${{ inputs.baseline_run_id }}
+      ONESHOT_SIGNING_DIRECTORY: ${{ runner.temp }}/oneshot-signing-${{ github.run_id }}-${{ github.run_attempt }}
+      ONESHOT_ARTIFACT_ROOT: ${{ runner.temp }}/oneshot-artifacts
+      ONESHOT_PUBLIC_ARTIFACTS: ${{ runner.temp }}/oneshot-public-artifacts
+      ONESHOT_PREVIOUS_APP: ''
+      ONESHOT_EXPECTED_TEAM_ID: ${{ vars.ONESHOT_EXPECTED_TEAM_ID }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate inputs
+        run: |
+          set -euo pipefail
+          python3 packaging/release_metadata.py validate \
+            --version "$ONESHOT_RELEASE_VERSION" --build-number "$ONESHOT_BUILD_NUMBER" \
+            --commit "$GITHUB_SHA" --signing-mode "$ONESHOT_SIGNING_MODE"
+          python3 - <<'PY'
+          import os
+          import re
+          if os.environ['ONESHOT_SIGNING_MODE'] not in ('self-signed', 'apple-development', 'developer-id'):
+              raise SystemExit('A reusable certificate signing mode is required; no ad-hoc fallback exists.')
+          baseline = os.environ['ONESHOT_BASELINE_RUN_ID']
+          if baseline and not re.fullmatch(r'[1-9][0-9]*', baseline):
+              raise SystemExit('baseline_run_id must be a positive workflow run ID.')
+          PY
+      - name: Test release and identity tooling
+        run: |
+          set -euo pipefail
+          zsh -n scripts/build-release.sh scripts/verify-release.sh scripts/import-signing-identity.sh scripts/cleanup-signing-identity.sh
+          python3 scripts/test_release_metadata.py
+          python3 scripts/test_signing.py
+          python3 scripts/test_signing_identity.py
+          python3 scripts/test_release_cli.py
+      - name: Check real signing with a disposable identity
+        run: python3 scripts/test_signing_integration.py
+      - name: Run Swift tests
+        run: zsh scripts/test.sh
+      - name: Resolve the previous signed artifact in this repository
+        id: baseline
+        if: inputs.baseline_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import urllib.request
+          base = os.environ['GITHUB_API_URL'] + '/repos/' + os.environ['GITHUB_REPOSITORY'] + '/actions/runs/'
+          def request(url):
+              headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json',
+                         'X-GitHub-Api-Version': '2022-11-28'}
+              with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30) as response:
+                  return json.load(response)
+          run_id = os.environ['ONESHOT_BASELINE_RUN_ID']
+          current = request(base + os.environ['GITHUB_RUN_ID'])
+          previous = request(base + run_id)
+          if run_id == os.environ['GITHUB_RUN_ID'] or previous.get('workflow_id') != current.get('workflow_id'):
+              raise SystemExit('The baseline must be an earlier run of this same workflow.')
+          if previous.get('event') != 'workflow_dispatch' or previous.get('conclusion') != 'success':
+              raise SystemExit('The baseline must be a successful manually dispatched signed build.')
+          if previous.get('head_branch') != current.get('head_branch'):
+              raise SystemExit('The baseline must come from the same default branch.')
+          candidates = []
+          page = 1
+          while True:
+              data = request(base + run_id + '/artifacts?per_page=100&page=' + str(page))
+              artifacts = data.get('artifacts', [])
+              for artifact in artifacts:
+                  match = re.fullmatch(r'oneshot-signed-' + re.escape(run_id) + r'-([1-9][0-9]*)', artifact.get('name', ''))
+                  if match and not artifact.get('expired'):
+                      candidates.append((int(match.group(1)), artifact['id']))
+              if len(artifacts) < 100:
+                  break
+              page += 1
+          if not candidates:
+              raise SystemExit('The baseline signed artifact is missing or expired.')
+          candidates.sort()
+          if len(candidates) > 1 and candidates[-1][0] == candidates[-2][0]:
+              raise SystemExit('The baseline artifact selection is ambiguous.')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('artifact_id=' + str(candidates[-1][1]) + '\n')
+          PY
+      - name: Download the previous signed artifact
+        if: inputs.baseline_run_id != ''
+        uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ steps.baseline.outputs.artifact_id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.baseline_run_id }}
+          path: ${{ runner.temp }}/oneshot-baseline-download
+          digest-mismatch: error
+      - name: Prepare the previous app without executing it
+        if: inputs.baseline_run_id != ''
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import Path, PurePosixPath
+          import shutil
+          import tarfile
+          root = Path(os.environ['RUNNER_TEMP'])
+          destination = root / 'oneshot-baseline'
+          destination.mkdir(mode=0o700)
+          archive_path = root / 'oneshot-baseline-download' / 'OneShot.app.tar.gz'
+          if archive_path.is_symlink() or not archive_path.is_file():
+              raise SystemExit('The baseline artifact must contain OneShot.app.tar.gz.')
+          with tarfile.open(archive_path, 'r:gz') as archive:
+              members = archive.getmembers()
+              if len(members) > 50000 or sum(member.size for member in members) > 1_073_741_824:
+                  raise SystemExit('The baseline app exceeds the supported archive size.')
+              names = set()
+              for member in members:
+                  relative = PurePosixPath(member.name)
+                  if relative.is_absolute() or '..' in relative.parts or not relative.parts or relative.parts[0] != 'OneShot.app':
+                      raise SystemExit('The baseline archive contains a path outside OneShot.app.')
+                  if relative in names or not (member.isdir() or member.isfile()):
+                      raise SystemExit('The baseline archive contains duplicate paths, links, or special files.')
+                  names.add(relative)
+                  target = destination.joinpath(*relative.parts)
+                  if member.isdir():
+                      target.mkdir(parents=True, exist_ok=True)
+                  else:
+                      target.parent.mkdir(parents=True, exist_ok=True)
+                      with archive.extractfile(member) as source, target.open('xb') as output:
+                          shutil.copyfileobj(source, output)
+                      target.chmod(member.mode & 0o777)
+          app = destination / 'OneShot.app'
+          if not app.is_dir():
+              raise SystemExit('The baseline app bundle is missing.')
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              output.write('ONESHOT_PREVIOUS_APP=' + str(app) + '\n')
+          PY
+      - name: Import the fixed signing identity
+        env:
+          ONESHOT_SIGNING_CERTIFICATE_BASE64: ${{ secrets.ONESHOT_SIGNING_CERTIFICATE_BASE64 }}
+          ONESHOT_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.ONESHOT_SIGNING_CERTIFICATE_PASSWORD }}
+          ONESHOT_SIGNING_IDENTITY: ${{ secrets.ONESHOT_SIGNING_IDENTITY }}
+        run: zsh scripts/import-signing-identity.sh --directory "$ONESHOT_SIGNING_DIRECTORY" --github-env "$GITHUB_ENV"
+      - name: Build and verify the signed preview
+        run: |
+          set -euo pipefail
+          oneshot_arguments=(--version "$ONESHOT_RELEASE_VERSION" --build-number "$ONESHOT_BUILD_NUMBER"
+            --ref "$GITHUB_SHA" --output-dir "$ONESHOT_ARTIFACT_ROOT" --signing-mode "$ONESHOT_SIGNING_MODE"
+            --signing-identity "$ONESHOT_SIGNING_IDENTITY" --signing-keychain "$ONESHOT_SIGNING_KEYCHAIN")
+          if [[ -n "$ONESHOT_PREVIOUS_APP" ]]; then
+            oneshot_arguments+=(--previous-app "$ONESHOT_PREVIOUS_APP")
+          fi
+          zsh scripts/build-release.sh "${oneshot_arguments[@]}"
+      - name: Collect only public release artifacts
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import shutil
+          import subprocess
+          manifests = list(Path(os.environ['ONESHOT_ARTIFACT_ROOT']).glob('*/release-manifest.json'))
+          if len(manifests) != 1:
+              raise SystemExit('Expected exactly one verified release directory.')
+          release = manifests[0].parent
+          public = Path(os.environ['ONESHOT_PUBLIC_ARTIFACTS'])
+          public.mkdir(mode=0o700)
+          files = [release / 'release-manifest.json', release / 'code-signing.json']
+          for pattern in ('*.dmg', '*.dmg.sha256', '*-source.tar.gz'):
+              matches = list(release.glob(pattern))
+              if len(matches) != 1:
+                  raise SystemExit('Expected one public release artifact for ' + pattern)
+              files.extend(matches)
+          compatibility = release / 'identity-compatibility.json'
+          if os.environ['ONESHOT_PREVIOUS_APP']:
+              files.append(compatibility)
+          elif compatibility.exists():
+              raise SystemExit('An identity comparison was reported without a baseline.')
+          for source in files:
+              if source.is_symlink() or not source.is_file():
+                  raise SystemExit('A public release artifact is missing or linked.')
+              shutil.copyfile(source, public / source.name)
+          app = release / 'OneShot.app'
+          if app.is_symlink() or not app.is_dir():
+              raise SystemExit('The verified app bundle is missing.')
+          subprocess.run(['/usr/bin/tar', '-czf', str(public / 'OneShot.app.tar.gz'), '-C', str(release), 'OneShot.app'],
+                         check=True, env=dict(os.environ, COPYFILE_DISABLE='1'))
+          PY
+      - name: Remove the temporary signing keychain
+        if: always()
+        run: zsh scripts/cleanup-signing-identity.sh --directory "$ONESHOT_SIGNING_DIRECTORY"
+      - name: Upload the signed app and release evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: oneshot-signed-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/oneshot-public-artifacts/
+          archive: true
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+      - name: Record the upgrade verification boundary
+        run: |
+          python3 - <<'PY'
+          import os
+          comparison = ('Component code requirements were compared in both directions against baseline run ' +
+                        os.environ['ONESHOT_BASELINE_RUN_ID'] + '.') if os.environ['ONESHOT_PREVIOUS_APP'] else \
+                       'Previous/candidate identity compatibility: not checked (no baseline run supplied).'
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as output:
+              output.write('Signing mode: ' + os.environ['ONESHOT_SIGNING_MODE'] + '\n\n' + comparison + '\n\n')
+              output.write('macOS privacy permission inheritance is not verified by this build. An actual upgrade and capture test on the user Mac is still required.\n\n')
+              output.write('The preview is not notarized. No GitHub Release, tag, or repository changes were published.\n')
+          PY

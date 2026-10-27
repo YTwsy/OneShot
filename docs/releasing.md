@@ -1,67 +1,98 @@
 # 构建与发布
 
-首发产品为 OneShot，支持 macOS 14+ 与 Apple Silicon（arm64），使用 MIT License。GitHub 发布目标为 `YTwsy/OneShot`。首个候选版本为 `v0.1.0-alpha.1`，定位 Pre-release；自动更新后续加入。
+OneShot 支持 macOS 14+ 与 Apple Silicon（arm64），使用 MIT License，目前为 Pre-release，采用手动下载替换更新。已有 build 4 安装包使用 ad-hoc 签名且未经 Apple 公证。下述证书构建流程需要先配置签名身份；加入工作流本身不会改变已安装版本或现有授权。
 
-当前没有 Developer ID 签名或 Apple 公证，分发包使用 ad-hoc 签名并明确标注未公证。签名、系统采集授权和功能验证是不同的验收项。
-
-## 产品布局
+## 组件与代码身份
 
 ```text
 OneShot.app/
   Contents/
-    Info.plist
     MacOS/oneshot-editor
-    Resources/…应用图标与许可证
-    Helpers/
-      OneShot Capture.app/
-        Contents/MacOS/oneshot
-      oneshot-mcp
+    Helpers/OneShot Capture.app/Contents/MacOS/oneshot
+    Helpers/oneshot-mcp
+    Resources/…应用图标、许可证与安装说明
 ```
 
-| 组件 | 发布身份 | 作用 |
+| 组件 | 代码签名标识 | 作用 |
 | --- | --- | --- |
 | OneShot | `io.github.ytwsy.oneshot` | 编辑器、菜单栏和全局快捷键 |
 | OneShot Capture | `io.github.ytwsy.oneshot.capture-probe` | 实际执行截图、AX、OCR 和显式权限请求 |
-| oneshot-mcp | 随 App 安装的命令行工具 | 读取用户明确选定的一份交付材料 |
+| oneshot-mcp | `io.github.ytwsy.oneshot.mcp` | 读取用户明确选定的一份交付材料 |
 
-正式 App 优先使用内置组件，不自动沿用开发 Editor 保存的外部 Probe 路径。开发版的 `dev.oneshot.editor`、`dev.oneshot.capture-probe` 和相邻 App 布局继续保留。发布构建不替换开发版 Probe，也不改动 TCC 状态。
+三个组件使用同一证书，从内向外分别签名。发布版只使用内置 Capture，不替换开发版 Probe，也不修改系统 TCC 权限。保持 Bundle ID、安装路径与兼容的 designated requirement（DR，代码身份要求）；不要在每次构建时生成新证书。
+
+| 签名模式 | 适用范围 | 更新边界 |
+| --- | --- | --- |
+| `self-signed` | 固定自签根证书，用于受控测试 | 显式 DR 绑定组件 ID 与证书指纹，须复用同一证书及私钥；权限行为需实机验证 |
+| `apple-development` | 本地开发与测试 | 使用 Apple Development 身份，校验真实 Apple 证书链和 Team ID |
+| `developer-id`（默认） | 面向分发的签名 | 使用 Developer ID Application 身份及安全时间戳；当前流程仍不执行公证 |
+| `ad-hoc` | 明确选择的临时包 | 代码变化会改变身份要求，不能作为保持升级权限的方案 |
+
+Apple 说明隐私权限依赖代码身份要求；自签证书是否被某个子系统接受还取决于该子系统的策略。DR 检查通过只是升级验收的一部分，不能证明用户 Mac 已保留屏幕录制或辅助功能授权。见 [TN3127](https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements)、[TN2206](https://developer.apple.com/library/archive/technotes/tn2206/)。
+
+2026-10-27 在 macOS 14.8.5 的隔离对照中，仅导入 P12、指定 `--keychain` 而未加入用户钥匙串查找列表时，`codesign` 找不到身份。临时加入查找列表后，无需修改系统信任，即可签出两个代码不同的版本，三个组件的验证和双向 DR 比较均通过。证书仍显示 `CSSMERR_TP_NOT_TRUSTED`，因此不能用 `find-identity -v` 的默认信任判断阻断该自签路径。
+
+当前验证支持的自签证书约束是 `basicConstraints=critical,CA:true`、`keyUsage=critical,digitalSignature,keyCertSign`、`extendedKeyUsage=critical,codeSigning`。`CA:false` 的自签 leaf 虽可被 codesign 使用，但本机 LibreSSL 的自签根校验不接受它，当前流程不支持。临时实验身份已经销毁，尚未创建长期私钥，也未验证 TCC 权限继承。
 
 ## 本地构建
 
-先完成源码修改、自动测试及必要实测，固定到一个干净提交，再执行：
+先测试并提交准备出包的源码，构建脚本从干净 Git 提交导出隔离源码。证书和私钥留在钥匙串中；身份参数使用 `security find-identity -p codesigning` 对应的 **40 位证书 SHA1**。
 
 ```sh
-zsh scripts/build-release.sh --version 0.1.0-alpha.1 --build-number 1 --ref HEAD
+export ONESHOT_SIGNING_IDENTITY='<40-character-certificate-SHA1>'
+zsh scripts/build-release.sh --version 0.1.0-alpha.1 --build-number 5 --ref HEAD \
+  --signing-mode developer-id
 ```
 
-脚本从指定 Git 提交导出隔离的源码，使用 Release 配置与 arm64 构建三个可执行文件，组装 App 后从内向外签名，再制作 DMG。版本标签、数字应用版本、构建号和完整源码提交分别记录。`CFBundleShortVersionString` 使用 `0.1.0`；预发布后缀保留在发布标签与自定义元数据中。
+已有证书签名的授权基线时，增加 `--previous-app /Applications/OneShot.app`。这是阻断式检查：新旧三个组件必须互相满足对方的 DR，否则不生成交付包。从旧 ad-hoc 迁移到证书身份时，预期不兼容，需要首次重新授权；迁移包应省略此参数，并在发布说明中明确迁移边界。后续升级再以已授权的证书版本为基线。
 
-产物保存在版本／构建／提交专属目录，包含 App、DMG、SHA-256、源码归档及 `release-manifest.json`。已有产物不覆盖；需要重新出包时使用新的构建号。
+Apple Development 测试身份使用 `--signing-mode apple-development`；Apple 模式建议传 `--expected-team-id <TEAMID>`。指定非默认钥匙串时增加 `--signing-keychain /absolute/signing.keychain-db`。证书模式缺少身份、签名失败或证书类型不匹配都会停止，不回退到 ad-hoc。临时包必须显式传 `--signing-mode ad-hoc`，且不能同时指定证书。
 
-构建产物的清单和校验是发布依据，不把构建命令执行成功解释为安装、采集、签名信任或公证通过。发布脚本不上传、不创建 GitHub 仓库、不修改远程引用。
+产物目录为 `artifacts/OneShot-<version>-build<build>-<commit12>-<mode>/`，包含 App、DMG、SHA-256、源码归档、`code-signing.json` 和 `release-manifest.json`；有升级基线时另含 `identity-compatibility.json`。已有目录不覆盖。清单记录真实签名方式、各组件证书 SHA256、Team ID、DR、源码提交及 `permissionContinuity: not-verified`，不会把签名成功写成授权成功。关于窗口和安装说明也显示对应签名状态。
 
-## 发行验证
+可独立检查现有包或比较两个包：
 
-自动校验应核对：
+```sh
+python3 packaging/signing.py verify --app /absolute/OneShot.app --signing-mode developer-id
+python3 packaging/signing.py compare \
+  --previous-app /absolute/old/OneShot.app --candidate-app /absolute/new/OneShot.app
+```
 
-- App 内的主程序、采集组件和 MCP 齐全，架构均为 arm64，最低系统版本为 14.0。
-- 主 App 与 helper 的 Bundle ID、数字版本、构建号、预发布标签及源码提交相互一致。
-- 嵌套签名完整，实际为 ad-hoc；没有把本地签名描述为 Developer ID 或已公证。
-- DMG 可只读挂载，内含完整 App、Applications 入口与许可证，SHA-256 可验证。
-- 从挂载包复制到普通安装目录后，内置组件可被定位，MCP 以持续打开的 stdio 连接逐条响应。
+## GitHub Actions 证书构建
 
-人工实机验收还包括下载后的 Gatekeeper 首次打开、首次授权、采集失败后的恢复、升级后权限、连续快捷键、未保存标注期间的新采集、关闭编辑窗口后再采集和 HUD 不抢焦点。没有完成的项目必须保留在 Pre-release 说明中。
+`.github/workflows/build.yml` 执行普通编译和测试，不读取发布签名私钥。两份工作流的 `python3 scripts/test_signing_integration.py` 使用独立的两天临时证书，真正签出代码不同的两代 arm64 组件，校验 DR 兼容并清理证书、私钥和钥匙串查找项；该测试身份不会用于发布。`.github/workflows/signed-build.yml` 提供手动触发的证书构建，只允许默认分支，使用 GitHub environment `signing`，不会自动推送、打标签或创建 Release。
 
-当前使用 ad-hoc 签名，升级后系统可能需要重新批准采集组件。应用的权限检查与授权入口使用实际 helper；最终批准由用户在系统设置中完成。不要用自动重置权限或关闭系统安全检查代替验证。
+在**确认目标仓库后**配置 `signing` environment，并设置 required reviewers 与仅允许默认分支部署。工作流引用 environment 不会自动替代这些仓库保护设置。配置以下 environment Secrets：
 
-首次启动采用[独立的两项权限引导](permissions.md)。主 App 与采集组件均携带屏幕录制用途说明；权限请求由完成 AppKit 启动的 helper 分别执行，检查完成不代表系统弹窗或用户批准已通过实测。
+| Secret | 内容 |
+| --- | --- |
+| `ONESHOT_SIGNING_CERTIFICATE_BASE64` | 长期使用的证书及私钥导出的、带密码 P12 的 Base64 |
+| `ONESHOT_SIGNING_CERTIFICATE_PASSWORD` | P12 导出密码 |
+| `ONESHOT_SIGNING_IDENTITY` | 该证书的 40 位 SHA1；它不是私钥 |
 
-## GitHub 开源与发布
+不要把 P12、私钥、导出密码或 Base64 内容放进仓库、构建参数、日志或产物。工作流将既有身份导入 runner 的临时钥匙串，保留原有查找项并添加本次钥匙串，所有签名显式指定此钥匙串；不会生成替代发布证书，不改变全局信任或用户默认钥匙串。任务结束移除本次钥匙串及查找项，保留其他条目；上传清单只包含公开构建结果。GitHub 官方流程见[在 Actions 中签名 Xcode 应用](https://docs.github.com/en/actions/how-tos/deploy/deploy-to-third-party-platforms/sign-xcode-applications)。
 
-公开前检查当前文件及准备公开的历史：凭据、原始截图、AX／OCR 正文、设备和网络数据、个人文件路径、第三方代码或资源来源。`.gitignore` 不会移除已经进入历史的文件。保留当前仓库配置的 Git 作者与提交者身份，不为了平台隐私而静默改写它。
+Apple 模式可在 environment Variables 设置 `ONESHOT_EXPECTED_TEAM_ID`，用于核对预期团队；自签模式不设置此变量。手动运行时填写版本、构建号和签名模式，默认 `developer-id`。选择 `self-signed` 时使用满足上述约束的固定证书；它不会获得系统全局信任。`baseline_run_id` 可选：填入同一仓库前一次成功证书构建的 run ID，下载其 App 作为 DR 基线。首次证书构建留空，报告应显示未做基线检查。旧产物过期、签名模式或身份不兼容时修复基线或身份配置，不跳过失败冒充升级通过。
 
-`Captures/`、`Ref/`、`LocalEvidence/`、`Edits/`、`.build/`、`artifacts/` 留在本地。发布 DMG 只从干净源码和明确的打包清单产生，不复制开发工作区。
+工作流的 App 使用 tar 归档保留可执行权限，当前布局不需要 App 内符号链接，基线解包拒绝链接与越界路径。产物名包含 run ID 和 attempt；DMG、校验和及报告一起上传。CI runner 换机器不影响证书身份，用户授权仍保存在用户 Mac 上。证书轮换需要重新比较兼容性；固定自签证书的 leaf 指纹改变会失败。
 
-GitHub 首次公开时，确认目标 `YTwsy/OneShot`、公开可见性、推送的提交／分支、版本标签和要上传的产物；然后创建仓库、推送经过核验的源码、在相同提交打标签，并以 Pre-release 发布 DMG、校验和及源码／构建清单。不要提前发布尚未验证的包，也不要将预发布标为稳定最新版。
+## 升级与发行验收
 
-发布后再次核对远程标签指向、Release 的 Pre-release 状态、产物名称／大小和校验和，记录链接。发布成功与否以远端实际状态为准。
+自动校验包括三个组件的 arm64 架构、macOS 14.0 部署目标、Bundle ID、版本／构建／提交一致性、hardened runtime、签名完整性，以及证书实际类型。Developer ID 和 Apple Development 通过 Apple anchor、用途 OID 与 Team ID 校验；自签模式校验自签证书及精确 leaf DR。模式名称或证书显示名称不能替代这些检查。
+
+权限保持必须在用户 Mac 完成一次真实升级链路：
+
+1. 安装证书签名版本 A 到 `/Applications/OneShot.app`，为实际 Capture 组件批准屏幕录制和辅助功能；确认截图及 AX 控件读取成功。
+2. 使用相同身份从 Actions 构建代码发生变化的版本 B，指定 A 的 CI run 为基线（若 A 为本地包，先独立执行 compare）。
+3. 退出 A、替换安装 B、从相同路径启动，检查 Capture 的实际权限，并真正截图、读取控件。
+4. 记录 macOS 版本、A/B 提交、证书指纹、DR 比较结果及实际采集结果。只在该环境验证通过后描述“此次升级保留权限”。
+
+旧 ad-hoc → 首个证书版本需要单独作为迁移验收，不能拿它证明后续证书版本之间失去权限。不要自动重置 TCC、代替用户批准权限或关闭系统安全检查。权限恢复步骤见[权限引导](permissions.md)。
+
+其他实机验收包括 DMG 只读挂载和安装、下载后的 Gatekeeper 首次打开、首次授权与失败恢复、连续快捷键、未保存标注期间的新采集、关闭编辑窗口后再采集、HUD 焦点和持续 stdio 的 MCP。签名检查不代替这些验收，未完成项保留在预发布说明中。
+
+## 公开发布
+
+文档中的计划目标是 `YTwsy/OneShot`，但远端以实际确认和配置为准。首次公开前确认目标、可见性、推送范围、版本标签与产物，并检查准备公开的文件和历史是否含凭据、原始截图、AX／OCR 正文或个人路径。保留当前 Git 作者身份。`Captures/`、`Ref/`、`LocalEvidence/`、`Edits/`、`.build/`、`artifacts/` 留在本地。
+
+在相同已验证提交打标签，以 Pre-release 发布 DMG、校验和及构建清单，再核对远端标签和实际产物。当前脚本及工作流不创建远程仓库，也不声称已发布、公证或通过实机升级验收。

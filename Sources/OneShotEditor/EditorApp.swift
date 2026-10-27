@@ -147,8 +147,12 @@ final class EditorDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         if bundle.object(forInfoDictionaryKey: "OneShotDistributionChannel") as? String == "prerelease" {
             details.append("预发布测试版")
         }
-        if bundle.object(forInfoDictionaryKey: "OneShotSigningStatus") as? String == "ad-hoc-unnotarized" {
-            details.append("ad-hoc 签名 · 未经 Apple 公证")
+        switch bundle.object(forInfoDictionaryKey: "OneShotSigningStatus") as? String {
+        case "ad-hoc-unnotarized": details.append("ad-hoc 签名 · 未经 Apple 公证")
+        case "self-signed-unnotarized": details.append("自签证书签名 · 未经 Apple 公证")
+        case "apple-development-unnotarized": details.append("Apple Development 签名 · 未经 Apple 公证")
+        case "developer-id-unnotarized": details.append("Developer ID 签名 · 未经 Apple 公证")
+        default: break
         }
         if let commit = bundle.object(forInfoDictionaryKey: "OneShotSourceCommit") as? String {
             details.append("源代码提交：\(commit.prefix(12))")

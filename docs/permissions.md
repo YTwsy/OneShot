@@ -41,7 +41,7 @@ OneShot 在开始新采集前需要两项独立权限：
 
 这只涉及采集组件的辅助功能授权；不要移除 OneShot Probe 开发组件、其他应用或已有效的屏幕录制授权。修复后应先确认引导的辅助功能变为“已开启”，再采集一个包含按钮的窗口，确认上下文中包含真实 AX 节点。
 
-Apple 的 [TN3127](https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements) 说明 ad-hoc 的代码要求绑定特定代码版本；[辅助功能权限指南](https://support.apple.com/guide/mac-help/allow-accessibility-apps-to-access-your-mac-mh43185/mac) 说明如何手动添加应用。上面的移除并重新添加是针对旧代码要求不匹配的恢复方法，仍需在当前安装版本上重新检查与验证。将来采用正式 Developer ID 签名时，需要保留一致的签名身份并验证升级行为。
+Apple 的 [TN3127](https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements) 说明 ad-hoc 的代码要求绑定特定代码版本；[辅助功能权限指南](https://support.apple.com/guide/mac-help/allow-accessibility-apps-to-access-your-mac-mh43185/mac) 说明如何手动添加应用。上面的移除并重新添加是针对旧代码要求不匹配的恢复方法，仍需在当前安装版本上重新检查与验证。[证书构建流程](releasing.md) 支持复用固定身份并比较升级代码要求；从旧 ad-hoc 包迁移时可能仍需首次授权，后续权限保持必须在实际升级采集中验证。
 
 ## 暂时只编辑已有材料
 

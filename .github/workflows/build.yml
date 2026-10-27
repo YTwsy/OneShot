@@ -17,6 +17,14 @@ jobs:
         run: swift --version
       - name: Check release metadata
         run: python3 scripts/test_release_metadata.py
+      - name: Check signing and keychain tooling
+        run: |
+          zsh -n scripts/build-release.sh scripts/verify-release.sh scripts/import-signing-identity.sh scripts/cleanup-signing-identity.sh
+          python3 scripts/test_signing.py
+          python3 scripts/test_signing_identity.py
+          python3 scripts/test_release_cli.py
+      - name: Check real signing with a disposable identity
+        run: python3 scripts/test_signing_integration.py
       - name: Run Swift tests
         run: zsh scripts/test.sh
       - name: Compile release products
