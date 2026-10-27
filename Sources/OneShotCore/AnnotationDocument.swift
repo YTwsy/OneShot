@@ -65,15 +65,32 @@ public struct AnnotationDocument: Codable, Equatable {
     public var imageWidth: Int
     public var imageHeight: Int
     public var items: [AnnotationItem]
+    public var feedbacks: [FeedbackItem]
 
     public init(schemaVersion: Int = 1, id: UUID = UUID(), sourceCaptureID: String,
-                imageWidth: Int, imageHeight: Int, items: [AnnotationItem] = []) {
+                imageWidth: Int, imageHeight: Int, items: [AnnotationItem] = [], feedbacks: [FeedbackItem] = []) {
         self.schemaVersion = schemaVersion
         self.id = id
         self.sourceCaptureID = sourceCaptureID
         self.imageWidth = imageWidth
         self.imageHeight = imageHeight
         self.items = items
+        self.feedbacks = feedbacks
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, id, sourceCaptureID, imageWidth, imageHeight, items, feedbacks
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try values.decode(Int.self, forKey: .schemaVersion)
+        id = try values.decode(UUID.self, forKey: .id)
+        sourceCaptureID = try values.decode(String.self, forKey: .sourceCaptureID)
+        imageWidth = try values.decode(Int.self, forKey: .imageWidth)
+        imageHeight = try values.decode(Int.self, forKey: .imageHeight)
+        items = try values.decode([AnnotationItem].self, forKey: .items)
+        feedbacks = try values.decodeIfPresent([FeedbackItem].self, forKey: .feedbacks) ?? []
     }
 
     public func validate() throws {
@@ -129,6 +146,42 @@ public struct AnnotationDocument: Codable, Equatable {
             totalText += item.text.utf8.count
             guard totalText <= 1_048_576 else {
                 throw AnnotationError.invalidDocument("说明文字总量超过支持范围。")
+            }
+        }
+        guard feedbacks.count <= 2_000 else {
+            throw AnnotationError.invalidDocument("反馈数量超过 2000。")
+        }
+        var segmentCount = 0
+        for feedback in feedbacks {
+            guard ids.insert(feedback.id).inserted else {
+                throw AnnotationError.invalidDocument("反馈标识重复。")
+            }
+            segmentCount += feedback.content.count
+            guard feedback.content.count <= 2_000, segmentCount <= 20_000 else {
+                throw AnnotationError.invalidDocument("反馈内容片段数量超过支持范围。")
+            }
+            var feedbackCharacters = 0
+            for segment in feedback.content {
+                switch segment {
+                case .text(let text):
+                    feedbackCharacters += text.count
+                    totalText += text.utf8.count
+                case .control(let reference):
+                    guard ids.insert(reference.id).inserted else {
+                        throw AnnotationError.invalidDocument("控件引用标识重复。")
+                    }
+                    guard !reference.nodeID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                          reference.nodeID.utf8.count <= 256,
+                          !reference.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                          reference.label.count <= 512 else {
+                        throw AnnotationError.invalidDocument("控件引用缺少有效节点标识或名称。")
+                    }
+                    feedbackCharacters += reference.label.count
+                    totalText += reference.label.utf8.count
+                }
+                guard feedbackCharacters <= 16_384, totalText <= 1_048_576 else {
+                    throw AnnotationError.invalidDocument("反馈说明文字超过支持范围。")
+                }
             }
         }
     }

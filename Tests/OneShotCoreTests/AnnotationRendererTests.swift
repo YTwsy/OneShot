@@ -6,6 +6,40 @@ import UniformTypeIdentifiers
 @testable import OneShotCore
 
 struct AnnotationRendererTests {
+    @Test func feedbackBadgesUseFrozenGeometryAndDoNotInventOffscreenMarkers() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("oneshot-feedback-render-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let original = root.appendingPathComponent("original.png")
+        try Self.writeFixture(to: original)
+        let originalData = try Data(contentsOf: original)
+        var document = AnnotationDocument(sourceCaptureID: "fixture", imageWidth: 400, imageHeight: 300)
+        let plain = root.appendingPathComponent("plain.png")
+        try AnnotationRenderer.exportPNG(imageURL: original, document: document, to: plain)
+        let index = CapturedElementIndex(elements: [
+            .init(id: "visible", role: "AXButton", label: "保存", imageBounds: .init(x: 50, y: 60, width: 120, height: 40)),
+            .init(id: "outside", role: "AXButton", label: "窗口外"),
+        ], status: "fixture")
+        document.feedbacks = [.init(content: [.text("参考 "), .control(.init(nodeID: "outside", label: "窗口外"))])]
+        let offscreen = root.appendingPathComponent("offscreen.png")
+        try AnnotationRenderer.exportPNG(imageURL: original, document: document, to: offscreen, elementIndex: index)
+        #expect(try Data(contentsOf: offscreen) == Data(contentsOf: plain))
+        document.feedbacks[0].content.append(.control(.init(nodeID: "visible", label: "保存")))
+        let visible = root.appendingPathComponent("visible.png")
+        try AnnotationRenderer.exportPNG(imageURL: original, document: document, to: visible, elementIndex: index)
+        #expect(try Data(contentsOf: visible) != Data(contentsOf: plain))
+        let pixels = try #require(NSBitmapImageRep(data: Data(contentsOf: visible)))
+        let marker = try #require(pixels.colorAt(x: 160, y: 57)?.usingColorSpace(.sRGB))
+        #expect(marker.blueComponent > marker.redComponent)
+        document.feedbacks[0].content = [.control(.init(nodeID: "missing", label: "未采集"))]
+        #expect(throws: AnnotationError.self) {
+            try AnnotationRenderer.exportPNG(imageURL: original, document: document,
+                to: root.appendingPathComponent("invalid.png"), elementIndex: index)
+        }
+        #expect(try Data(contentsOf: original) == originalData)
+        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("invalid.png").path))
+    }
+
     @Test func elementAnnotationsRenderGeometryButKeepNotesAndOffscreenReferencesOutOfPNG() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("oneshot-element-render-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

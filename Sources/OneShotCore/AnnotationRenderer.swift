@@ -84,6 +84,56 @@ public enum AnnotationRenderer {
         for item in items { draw(item: item, imageSize: imageSize) }
     }
 
+    /// Subtle R-prefixed badges for feedback controls. Their frozen bounds are
+    /// independent of editable drawing annotations and are never persisted as geometry.
+    public static func feedbackReferenceBadgeBounds(number: Int, elementBounds: CaptureRect,
+                                                     imageSize: CGSize, scale: CGFloat = 1) -> CGRect {
+        let safeScale = max(0.01, scale.isFinite ? scale : 1)
+        let label = "R\(number)" as NSString
+        let measured = label.size(withAttributes: [.font: NSFont.systemFont(ofSize: 11 / safeScale, weight: .semibold)])
+        let width = min(imageSize.width, measured.width + 10 / safeScale)
+        let height = min(imageSize.height, measured.height + 5 / safeScale)
+        let rect = elementBounds.cgRect
+        return CGRect(x: min(max(0, rect.maxX - width / 2), max(0, imageSize.width - width)),
+                      y: min(max(0, rect.minY - height / 2), max(0, imageSize.height - height)),
+                      width: width, height: height)
+    }
+
+    public static func drawFeedbackReferences(document: AnnotationDocument, elementIndex: CapturedElementIndex,
+                                               imageSize: CGSize, scale: CGFloat = 1,
+                                               highlightedNodeID: String? = nil) {
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        NSBezierPath(rect: CGRect(origin: .zero, size: imageSize)).addClip()
+        let elements = Dictionary(uniqueKeysWithValues: elementIndex.elements.map { ($0.id, $0) })
+        let safeScale = max(0.01, scale.isFinite ? scale : 1)
+        let tint = NSColor.systemBlue
+        for (offset, reference) in document.feedbackControlReferences.enumerated() {
+            guard let bounds = elements[reference.nodeID]?.imageBounds else { continue }
+            let rect = bounds.cgRect
+            if reference.nodeID == highlightedNodeID {
+                tint.withAlphaComponent(0.08).setFill()
+                NSBezierPath(rect: rect).fill()
+                tint.setStroke()
+                let border = NSBezierPath(rect: rect)
+                border.lineWidth = 1.5 / safeScale
+                border.stroke()
+            }
+            let label = "R\(offset + 1)" as NSString
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 11 / safeScale, weight: .semibold),
+                .foregroundColor: NSColor.white,
+            ]
+            let measured = label.size(withAttributes: attributes)
+            let badge = feedbackReferenceBadgeBounds(number: offset + 1, elementBounds: bounds,
+                                                      imageSize: imageSize, scale: safeScale)
+            tint.setFill()
+            NSBezierPath(roundedRect: badge, xRadius: 4 / safeScale, yRadius: 4 / safeScale).fill()
+            label.draw(at: CGPoint(x: badge.midX - measured.width / 2, y: badge.midY - measured.height / 2),
+                       withAttributes: attributes)
+        }
+    }
+
     private static func draw(item: AnnotationItem, imageSize: CGSize) {
         let tint = color(hex: item.colorHex)
         let start = CGPoint(x: item.start.x, y: item.start.y)
@@ -168,8 +218,20 @@ public enum AnnotationRenderer {
     }
 
     /// Writes a new PNG. The input image and captured context are never mutated.
-    public static func exportPNG(imageURL: URL, document: AnnotationDocument, to outputURL: URL) throws {
+    public static func exportPNG(imageURL: URL, document: AnnotationDocument, to outputURL: URL,
+                                 elementIndex: CapturedElementIndex? = nil) throws {
         try document.validate()
+        let feedbackElements: CapturedElementIndex?
+        if document.feedbackControlReferences.isEmpty {
+            feedbackElements = nil
+        } else {
+            feedbackElements = try elementIndex ?? CapturedElementIndex.load(from: AnnotationProject(
+                document: document, captureDirectory: imageURL.deletingLastPathComponent(), imageURL: imageURL))
+            let knownIDs = Set(feedbackElements!.elements.map(\.id))
+            guard document.feedbackControlReferences.allSatisfy({ knownIDs.contains($0.nodeID) }) else {
+                throw AnnotationError.invalidProject("反馈引用了此采集中不存在的 AX 节点。")
+            }
+        }
         let sourceURL = imageURL.resolvingSymlinksInPath().standardizedFileURL
         let destinationURL = outputURL.resolvingSymlinksInPath().standardizedFileURL
         guard sourceURL != destinationURL,
@@ -198,6 +260,9 @@ public enum AnnotationRenderer {
         image.draw(in: CGRect(origin: .zero, size: size), from: .zero, operation: .copy,
                    fraction: 1, respectFlipped: true, hints: nil)
         draw(items: document.items, imageSize: size)
+        if let feedbackElements {
+            drawFeedbackReferences(document: document, elementIndex: feedbackElements, imageSize: size)
+        }
         NSGraphicsContext.restoreGraphicsState()
         guard let flattened = bitmap.makeImage() else { throw AnnotationRenderError.bitmapUnavailable }
         let data = NSMutableData()

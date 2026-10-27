@@ -41,6 +41,7 @@ public final class ReadonlyHandoffReader {
     public let document: AgentHandoffDocument
     private let files: [String: PinnedFile]
     private var cachedAnnotation: (order: Int, data: Data)?
+    private var cachedFeedback: (order: Int, data: Data)?
 
     public init(directory: URL) throws {
         guard directory.isFileURL, directory.path.hasPrefix("/") else {
@@ -77,11 +78,16 @@ public final class ReadonlyHandoffReader {
               handoff.imageWidth == annotations.imageWidth, handoff.imageHeight == annotations.imageHeight,
               handoff.annotations.map(\.annotation) == annotations.items,
               handoff.annotations.enumerated().allSatisfy({ $0.element.order == $0.offset + 1 }),
+              handoff.feedbacks.map(\.feedback) == annotations.feedbacks,
+              handoff.feedbacks.enumerated().allSatisfy({ $0.element.order == $0.offset + 1 }),
+              handoff.feedbacks.allSatisfy({ $0.references.map(\.reference) == $0.feedback.controlReferences }),
               manifest.screenshot.status == "captured", let image = manifest.screenshot.file,
               Self.safeName(image) else {
             throw HandoffReadError.invalidPackage("采集、标注和交付材料的身份不一致。")
         }
-        let targets = Set(annotations.items.compactMap(\.targetNodeID))
+        let targets = Set(annotations.items.compactMap(\.targetNodeID) + annotations.feedbackControlReferences.map(\.nodeID))
+        let referenceNumbers = Dictionary(uniqueKeysWithValues: annotations.feedbackControlReferences.enumerated()
+            .map { ($0.element.nodeID, $0.offset + 1) })
         if !targets.isEmpty {
             guard let sourceAX = pinned["accessibility"] else {
                 throw HandoffReadError.invalidPackage("标注对应的 AX 数据缺失。")
@@ -103,6 +109,18 @@ public final class ReadonlyHandoffReader {
                     .first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
                 guard node != nil, entry.targetNode == node, entry.targetRole == role, entry.targetLabel == label else {
                     throw HandoffReadError.invalidPackage("标注目标与原始 AX 节点不一致。")
+                }
+            }
+            for reference in handoff.feedbacks.flatMap(\.references) {
+                let node = selected[reference.reference.nodeID]
+                let role = Self.textAttribute("AXRole", in: node)
+                let label = ["AXTitle", "AXDescription", "AXValue"].compactMap { Self.textAttribute($0, in: node) }
+                    .first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+                guard node != nil, reference.targetNode == node,
+                      reference.targetRole == role, reference.targetLabel == label,
+                      reference.referenceNumber == referenceNumbers[reference.reference.nodeID],
+                      reference.imageBadgeNumber == nil || reference.imageBadgeNumber == reference.referenceNumber else {
+                    throw HandoffReadError.invalidPackage("反馈引用与原始 AX 节点不一致。")
                 }
             }
         }
@@ -146,6 +164,7 @@ public final class ReadonlyHandoffReader {
         }
         return ["captureID": document.captureID, "offset": offset, "nextOffset": end,
                 "totalAnnotations": document.annotations.count, "hasMore": end < document.annotations.count,
+                "totalFeedbacks": document.feedbacks.count,
                 "annotations": rows, "fullDetails": "read_annotation(order, offset, limit) returns the complete user note and frozen AX node as paged JSON."]
     }
 
@@ -161,6 +180,56 @@ public final class ReadonlyHandoffReader {
             cachedAnnotation = (order, data)
         }
         return try Self.textPage(data: data, captureID: document.captureID, source: "annotation:\(order)", offset: offset, limit: limit)
+    }
+
+    /// Feedback summaries retain reference identity without duplicating full frozen nodes.
+    public func readFeedbacks(offset: Int = 0, limit: Int = 20) throws -> [String: Any] {
+        guard offset >= 0, offset <= document.feedbacks.count, (1...100).contains(limit) else {
+            throw HandoffReadError.invalidRange
+        }
+        try files["handoff"]!.requireUnchanged()
+        let end = min(document.feedbacks.count, offset + limit)
+        let rows: [[String: Any]] = document.feedbacks[offset..<end].map { entry in
+            let note = Self.preview(entry.feedback.plainText, maximumBytes: 1_600)
+            let references: [[String: Any]] = entry.references.prefix(8).map { binding in
+                let label = Self.preview(binding.reference.label, maximumBytes: 160)
+                var value: [String: Any] = ["referenceID": binding.reference.id.uuidString,
+                    "nodeID": binding.reference.nodeID, "label": label.text, "labelTruncated": label.truncated,
+                    "referenceNumber": binding.referenceNumber, "reference": "R\(binding.referenceNumber)"]
+                if let badge = binding.imageBadgeNumber { value["imageBadge"] = "R\(badge)" }
+                return value
+            }
+            return ["order": entry.order, "feedbackID": entry.feedback.id.uuidString,
+                    "userNote": note.text, "userNoteTruncated": note.truncated,
+                    "referenceCount": entry.references.count,
+                    "referencesTruncated": entry.references.count > references.count, "references": references]
+        }
+        return ["captureID": document.captureID, "offset": offset, "nextOffset": end,
+                "totalFeedbacks": document.feedbacks.count, "hasMore": end < document.feedbacks.count,
+                "feedbacks": rows,
+                "fullDetails": "read_feedback(order, offset, limit) returns the ordered text and references with every full frozen AX node as paged JSON."]
+    }
+
+    public func readFeedback(order: Int, offset: Int = 0, limit: Int = 12_000) throws -> HandoffTextPage {
+        guard order > 0, order <= document.feedbacks.count, offset >= 0,
+              (4...65_536).contains(limit) else { throw HandoffReadError.invalidRange }
+        try files["handoff"]!.requireUnchanged()
+        let data: Data
+        if let cachedFeedback, cachedFeedback.order == order {
+            data = cachedFeedback.data
+        } else {
+            data = try SnapshotStore.encoder.encode(document.feedbacks[order - 1])
+            cachedFeedback = (order, data)
+        }
+        return try Self.textPage(data: data, captureID: document.captureID,
+            source: "feedback:\(order)", offset: offset, limit: limit)
+    }
+
+    public func readFeedback(id: UUID, offset: Int = 0, limit: Int = 12_000) throws -> HandoffTextPage {
+        guard let entry = document.feedbacks.first(where: { $0.feedback.id == id }) else {
+            throw HandoffReadError.unavailable
+        }
+        return try readFeedback(order: entry.order, offset: offset, limit: limit)
     }
 
     private static func preview(_ value: String, maximumBytes: Int) -> (text: String, truncated: Bool) {

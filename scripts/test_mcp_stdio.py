@@ -118,21 +118,43 @@ def main() -> int:
             raise RuntimeError("Unexpected protocol negotiation")
         client.send(dict(method="notifications/initialized"))
         tools = client.request("tools/list")["tools"]
-        expected = {"read_brief", "read_annotations", "read_annotation", "read_context", "read_image"}
+        expected = {"read_brief", "read_annotations", "read_annotation", "read_feedbacks", "read_feedback", "read_context", "read_image"}
         if {tool["name"] for tool in tools} != expected:
             raise RuntimeError("Unexpected tool surface")
         brief = client.tool("read_brief", dict(limit=4_096))
         annotations = client.tool("read_annotations")
+        feedbacks = client.tool("read_feedbacks")
         manifest = client.tool("read_context", dict(source="manifest", limit=4_096))
-        if not brief.get("captureID") or brief["captureID"] != annotations.get("captureID") or brief["captureID"] != manifest.get("captureID"):
+        if not brief.get("captureID") or any(brief["captureID"] != result.get("captureID") for result in [annotations, feedbacks, manifest]):
             raise RuntimeError("Tool responses disagree on the selected capture")
-        if "annotations" not in annotations or not manifest.get("text"):
+        if "annotations" not in annotations or "feedbacks" not in feedbacks or not manifest.get("text"):
             raise RuntimeError("Selected capture material was not readable")
+        first_feedback_references = 0
+        if feedbacks["feedbacks"]:
+            first = feedbacks["feedbacks"][0]
+            chunks = []
+            offset = 0
+            while True:
+                page = client.tool("read_feedback", dict(order=first["order"], offset=offset, limit=4_096))
+                chunks.append(page["text"].encode("utf-8"))
+                if not page["hasMore"]:
+                    break
+                if page["nextOffset"] <= offset:
+                    raise RuntimeError("Feedback pagination did not advance")
+                offset = page["nextOffset"]
+            feedback = json.loads(b"".join(chunks))
+            if feedback["feedback"]["id"] != first["feedbackID"]:
+                raise RuntimeError("Full feedback disagrees with its index")
+            for reference in feedback["references"]:
+                if reference["targetNode"]["id"] != reference["reference"]["nodeID"]:
+                    raise RuntimeError("Feedback reference does not contain its frozen AX node")
+            first_feedback_references = len(feedback["references"])
         stderr_bytes = client.finish()
         print(json.dumps(dict(
             result="passed", transport="persistent live stdio", initializeBeforeEOF=True,
             allResponsesBeforeEOF=True, responses=client.responses, tools=len(tools),
             captureID=brief["captureID"], totalAnnotations=annotations["totalAnnotations"],
+            totalFeedbacks=feedbacks["totalFeedbacks"], firstFeedbackReferences=first_feedback_references,
             stderrBytes=stderr_bytes,
         ), ensure_ascii=False))
         return 0

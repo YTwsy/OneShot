@@ -115,12 +115,12 @@ public enum AnnotationStore {
     }
 
     private static func requireElementBindings(_ document: AnnotationDocument, capture: AnnotationProject) throws {
-        let targets = document.items.compactMap(\.targetNodeID)
+        let targets = document.items.compactMap(\.targetNodeID) + document.feedbackControlReferences.map(\.nodeID)
         guard !targets.isEmpty else { return }
         let index = try CapturedElementIndex.load(from: capture)
         let elements = Dictionary(uniqueKeysWithValues: index.elements.map { ($0.id, $0) })
         guard targets.allSatisfy({ elements[$0] != nil }) else {
-            throw AnnotationError.invalidProject("元素标注引用了此采集中不存在的 AX 节点。")
+            throw AnnotationError.invalidProject("标注或反馈引用了此采集中不存在的 AX 节点。")
         }
         for item in document.items where item.kind == .element {
             let bounds = elements[item.targetNodeID!]?.imageBounds

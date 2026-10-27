@@ -195,7 +195,7 @@ struct EditorRootView: View {
         VStack(spacing: 0) {
             HStack(spacing: 16) {
                 Text("OneShot").font(.system(size: 20, weight: .bold, design: .rounded))
-                Text("标注工作台").foregroundStyle(.secondary)
+                Text("反馈与标注").foregroundStyle(.secondary)
                 Spacer()
                 recentCapturesMenu
                 Button("打开…", systemImage: "folder", action: model.openPanel)
@@ -234,9 +234,11 @@ struct EditorRootView: View {
             }.padding(.horizontal, 18).padding(.vertical, 10)
             Divider()
             if let document = model.document, let image = model.image {
-                HStack(spacing: 0) {
+                HSplitView {
                     VStack(spacing: 0) {
                         HStack(spacing: 6) {
+                            Button("写反馈", systemImage: "text.bubble") { model.writeFeedback() }
+                                .tint(model.inspectorMode == "feedback" ? .accentColor : .secondary)
                             toolButton(.select, "选择", "cursorarrow")
                             toolButton(.element, "控件", "viewfinder")
                             toolButton(.number, "编号", "number.circle")
@@ -251,15 +253,29 @@ struct EditorRootView: View {
                             }.labelsHidden().frame(width: 82).accessibilityLabel("画布缩放")
                         }.padding(12)
                         Divider()
+                        if model.isPickingReference {
+                            HStack {
+                                Image(systemName: "viewfinder").foregroundStyle(.tint)
+                                Text("点选要引用的控件").font(.subheadline)
+                                Spacer()
+                                Button("从列表选择") { model.beginReferenceSearch() }
+                                Button("取消 · Esc") { model.cancelReferencePicking() }
+                            }.padding(.horizontal, 16).padding(.vertical, 10).background(Color.accentColor.opacity(0.08))
+                            Divider()
+                        }
                         AnnotationCanvas(image: image, document: document, tool: model.tool, selectedID: model.selectedID,
                                          colorHex: model.colorHex, strokeWidth: model.strokeWidth, zoom: model.zoom,
                                          onSelect: model.select, onChange: { model.changeItems($0) }, onDelete: model.deleteSelected,
                                          elementIndex: model.elementIndex, highlightedElementID: model.highlightedElementID,
                                          onElementSelect: model.annotateElement, onUndo: model.undo, onRedo: model.redo,
-                                         canUndo: !model.undoHistory.isEmpty, canRedo: !model.redoHistory.isEmpty)
+                                         canUndo: !model.undoHistory.isEmpty, canRedo: !model.redoHistory.isEmpty,
+                                         isPickingReference: model.isPickingReference,
+                                         onReferencePick: { model.insertReference($0) },
+                                         onCancelReferencePick: { model.cancelReferencePicking() },
+                                         onFeedbackReferenceSelect: model.showFeedbackReference)
                     }
-                    Divider()
-                    inspector(document).frame(width: 290)
+                    .frame(minWidth: 640)
+                    inspector(document).frame(minWidth: 320, idealWidth: 360, maxWidth: 460)
                 }
             } else {
                 VStack(spacing: 18) {
@@ -301,9 +317,17 @@ struct EditorRootView: View {
                     Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange).help(error)
                 }
                 Spacer()
-                if let document = model.document { Text("\(document.items.count) 个标注").font(.caption).foregroundStyle(.secondary) }
+                if let document = model.document { Text("\(document.feedbacks.count) 条反馈 · \(document.items.count) 个标注").font(.caption).foregroundStyle(.secondary) }
             }.padding(.horizontal, 16).padding(.vertical, 9)
         }.frame(minWidth: 1080, minHeight: 580)
+            .onChange(of: model.inspectorMode) { _, mode in
+                if mode == "feedback" {
+                    model.tool = .select
+                    model.selectedID = nil
+                } else {
+                    model.cancelReferencePicking(restoreFocus: false)
+                }
+            }
             .sheet(isPresented: $model.handoffPresented) { AgentHandoffView(model: model) }
             .sheet(isPresented: $capture.isShowingPermissionGuide) { PermissionOnboardingView(capture: capture) }
     }
@@ -332,7 +356,13 @@ struct EditorRootView: View {
     }
 
     func toolButton(_ tool: EditorTool, _ title: String, _ icon: String) -> some View {
-        Button { model.tool = tool; if tool == .element { model.inspectorMode = "elements" } } label: { Label(title, systemImage: icon).padding(.vertical, 4).padding(.horizontal, 3) }
+        Button {
+            model.feedbackEditor.commitEditing()
+            model.cancelReferencePicking(restoreFocus: false)
+            model.highlightedElementID = nil
+            model.tool = tool
+            model.inspectorMode = tool == .element ? "elements" : "annotations"
+        } label: { Label(title, systemImage: icon).padding(.vertical, 4).padding(.horizontal, 3) }
             .buttonStyle(.bordered).tint(model.tool == tool ? .accentColor : .secondary)
             .accessibilityLabel(title + "工具")
             .disabled(tool == .element && (model.elementIndex?.elements.isEmpty ?? true))
@@ -340,10 +370,15 @@ struct EditorRootView: View {
 
     func inspector(_ document: AnnotationDocument) -> some View {
         VStack(alignment: .leading, spacing: 16) {
-            Picker("侧栏", selection: $model.inspectorMode) {
-                Text("标注").tag("annotations"); Text("控件树").tag("elements")
+            Picker("侧栏", selection: Binding(get: { model.inspectorMode }, set: {
+                model.feedbackEditor.commitEditing()
+                model.inspectorMode = $0
+            })) {
+                Text("反馈").tag("feedback"); Text("标注").tag("annotations"); Text("控件树").tag("elements")
             }.pickerStyle(.segmented)
-            if model.inspectorMode == "elements" {
+            if model.inspectorMode == "feedback" {
+                FeedbackInspector(model: model)
+            } else if model.inspectorMode == "elements" {
                 elementsInspector
             } else {
             Text(model.selected == nil ? "新标注样式" : "编辑标注").font(.headline)

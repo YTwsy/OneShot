@@ -15,18 +15,24 @@ final class EditorModel: ObservableObject {
     @Published var status = "打开一份采集，开始标注。"
     @Published var elementIndex: CapturedElementIndex?
     @Published var highlightedElementID: String?
-    @Published var inspectorMode = "annotations"
+    @Published var inspectorMode = "feedback"
+    @Published var selectedFeedbackID: UUID?
+    @Published var isPickingReference = false
+    @Published var referenceSearchQuery: String?
+    @Published var referenceSearchSelection = 0
+    private var searchReplacesMention = false
+    let feedbackEditor = FeedbackEditorBridge()
     @Published var elementSearch = ""
     @Published var expandedElements: Set<String> = []
-    @Published private(set) var undoHistory: [[AnnotationItem]] = []
-    @Published private(set) var redoHistory: [[AnnotationItem]] = []
+    @Published private(set) var undoHistory: [AnnotationDocument] = []
+    @Published private(set) var redoHistory: [AnnotationDocument] = []
     @Published private(set) var recentCaptures: [RecentCapture] = []
     @Published private(set) var recentError: String?
     @Published private(set) var isExportingHandoff = false
     @Published private(set) var handoff: AgentHandoffExport?
     @Published var handoffPresented = false
     private let recentStore: RecentCapturesStore
-    private var savedItems: [AnnotationItem] = []
+    private var savedDocument: AnnotationDocument?
     private var editGroup: String?
     weak var window: NSWindow?
 
@@ -42,11 +48,14 @@ final class EditorModel: ObservableObject {
 
     var document: AnnotationDocument? { project?.document }
     var selected: AnnotationItem? { document?.items.first { $0.id == selectedID } }
-    var isDirty: Bool { (document?.items ?? []) != savedItems }
+    var selectedFeedback: FeedbackItem? { document?.feedbacks.first { $0.id == selectedFeedbackID } }
+    var isDirty: Bool { document != savedDocument }
     var title: String { project?.projectDirectory?.deletingPathExtension().lastPathComponent ?? project?.captureDirectory.lastPathComponent ?? "OneShot" }
 
     func select(_ id: UUID?) {
+        cancelReferencePicking(restoreFocus: false)
         selectedID = id; editGroup = nil
+        if id != nil { inspectorMode = "annotations" }
         highlightedElementID = selected?.kind == .element ? selected?.targetNodeID : nil
     }
 
@@ -56,21 +65,170 @@ final class EditorModel: ObservableObject {
     }
 
     func changeItems(_ items: [AnnotationItem], group: String? = nil) {
-        guard var current = project, items != current.document.items else { return }
+        guard let current = project else { return }
         var next = current.document
         next.items = items
+        changeDocument(next, group: group)
+    }
+
+    private func changeDocument(_ next: AnnotationDocument, group: String? = nil) {
+        guard var current = project, next != current.document else { return }
         do { try next.validate() } catch { show(error); return }
         if group == nil || group != editGroup {
-            undoHistory.append(current.document.items)
+            undoHistory.append(current.document)
             if undoHistory.count > 100 { undoHistory.removeFirst() }
         }
         editGroup = group
         redoHistory.removeAll()
         current.document = next
         project = current
-        if let selectedID, !items.contains(where: { $0.id == selectedID }) { self.selectedID = nil }
-        status = "\(items.count) 个标注 · 尚未保存"
+        if let selectedID, !next.items.contains(where: { $0.id == selectedID }) { self.selectedID = nil }
+        if let selectedFeedbackID, !next.feedbacks.contains(where: { $0.id == selectedFeedbackID }) { self.selectedFeedbackID = nil }
+        status = "\(next.feedbacks.count) 条反馈 · \(next.items.count) 个标注" + (isDirty ? " · 尚未保存" : " · 无未保存修改")
         updateWindow()
+    }
+
+    func writeFeedback() {
+        feedbackEditor.commitEditing()
+        inspectorMode = "feedback"
+        selectedID = nil
+        if selectedFeedback == nil {
+            if let first = document?.feedbacks.first { selectedFeedbackID = first.id }
+            else { addFeedback() }
+        }
+        feedbackEditor.focus()
+    }
+
+    func addFeedback() {
+        feedbackEditor.commitEditing()
+        guard var next = document, next.feedbacks.count < 2_000 else { return }
+        cancelReferencePicking(restoreFocus: false)
+        let feedback = FeedbackItem()
+        next.feedbacks.append(feedback)
+        changeDocument(next)
+        selectedFeedbackID = feedback.id
+        selectedID = nil
+        inspectorMode = "feedback"
+        feedbackEditor.focus()
+    }
+
+    func selectFeedback(_ id: UUID) {
+        feedbackEditor.commitEditing()
+        cancelReferencePicking(restoreFocus: false)
+        selectedFeedbackID = id; selectedID = nil; editGroup = nil
+        inspectorMode = "feedback"
+        highlightedElementID = selectedFeedback?.controlReferences.first?.nodeID
+    }
+
+    func updateFeedback(_ id: UUID, content: [FeedbackSegment]) {
+        guard var next = document, let index = next.feedbacks.firstIndex(where: { $0.id == id }) else { return }
+        next.feedbacks[index].content = content
+        changeDocument(next, group: "feedback-\(id)")
+    }
+
+    func deleteFeedback(_ id: UUID) {
+        feedbackEditor.commitEditing()
+        guard var next = document else { return }
+        cancelReferencePicking(restoreFocus: false)
+        next.feedbacks.removeAll { $0.id == id }
+        changeDocument(next)
+        selectedFeedbackID = next.feedbacks.first?.id
+        highlightedElementID = nil
+    }
+
+    func beginReferencePicking() {
+        if selectedFeedback == nil { writeFeedback() }
+        feedbackEditor.prepareForPicking()
+        referenceSearchQuery = nil
+        isPickingReference = true
+        inspectorMode = "feedback"
+        status = "点选要引用的控件 · Esc 取消"
+    }
+
+    func cancelReferencePicking(restoreFocus: Bool = true) {
+        let wasActive = isPickingReference || referenceSearchQuery != nil
+        isPickingReference = false
+        referenceSearchQuery = nil
+        if restoreFocus && wasActive { feedbackEditor.cancelPicking() }
+        if wasActive, let document {
+            status = "\(document.feedbacks.count) 条反馈 · \(document.items.count) 个标注" + (isDirty ? " · 尚未保存" : "")
+        }
+    }
+
+    func insertReference(_ nodeID: String, fromSearch: Bool = false) {
+        guard selectedFeedback != nil, let element = elementIndex?.element(id: nodeID) else { return }
+        let reference = FeedbackControlReference(nodeID: nodeID,
+            label: element.label.isEmpty ? friendlyRole(element.role) : String(element.label.prefix(80)))
+        let replacesMention = fromSearch && searchReplacesMention
+        isPickingReference = false
+        referenceSearchQuery = nil
+        highlightedElementID = nodeID
+        feedbackEditor.insert(reference, replacingMention: replacesMention)
+        status = "已引用\(reference.label)，继续输入描述。"
+    }
+
+    func mentionChanged(_ query: String?) {
+        referenceSearchQuery = query
+        referenceSearchSelection = 0
+        searchReplacesMention = query != nil
+    }
+
+    func beginReferenceSearch() {
+        if selectedFeedback == nil { writeFeedback() }
+        feedbackEditor.prepareForPicking()
+        isPickingReference = false
+        referenceSearchQuery = ""
+        referenceSearchSelection = 0
+        searchReplacesMention = false
+    }
+
+    var referenceSearchResults: [CapturedElement] {
+        let query = (referenceSearchQuery ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let all = elementIndex?.elements ?? []
+        let matches = all.filter { element in
+            if query.isEmpty { return !element.label.isEmpty || element.role == "AXButton" }
+            return (element.label + " " + friendlyRole(element.role) + " " + element.id).localizedCaseInsensitiveContains(query)
+        }
+        return Array(matches.prefix(30))
+    }
+
+    func moveMentionSelection(_ offset: Int) {
+        let count = referenceSearchResults.count
+        if count > 0 { referenceSearchSelection = (referenceSearchSelection + offset + count) % count }
+    }
+
+    func acceptMentionSelection() -> Bool {
+        guard referenceSearchQuery != nil else { return false }
+        let results = referenceSearchResults
+        guard results.indices.contains(referenceSearchSelection) else { return false }
+        insertReference(results[referenceSearchSelection].id, fromSearch: true)
+        return true
+    }
+
+    func friendlyRole(_ role: String) -> String {
+        switch role {
+        case "AXButton": return "按钮"
+        case "AXTextField", "AXTextArea": return "输入框"
+        case "AXStaticText": return "文本"
+        case "AXCheckBox": return "复选框"
+        case "AXPopUpButton", "AXComboBox": return "下拉选项"
+        case "AXImage": return "图像"
+        case "AXLink": return "链接"
+        case "AXWindow": return "窗口"
+        case "AXGroup": return "容器"
+        default: return "控件"
+        }
+    }
+
+    func showFeedbackReference(_ nodeID: String) {
+        if selectedFeedback?.controlReferences.contains(where: { $0.nodeID == nodeID }) == true {
+            inspectorMode = "feedback"
+            highlightedElementID = nodeID
+            return
+        }
+        guard let feedback = document?.feedbacks.first(where: { $0.controlReferences.contains { $0.nodeID == nodeID } }) else { return }
+        selectFeedback(feedback.id)
+        highlightedElementID = nodeID
     }
 
     func updateSelected(_ mutate: (inout AnnotationItem) -> Void, group: String? = nil) {
@@ -99,13 +257,17 @@ final class EditorModel: ObservableObject {
         changeItems(items.filter { $0.id != selectedID })
     }
     func undo() {
-        guard var current = project, let items = undoHistory.popLast() else { return }
-        redoHistory.append(current.document.items); current.document.items = items; project = current
+        guard var current = project, let previous = undoHistory.popLast() else { return }
+        cancelReferencePicking(restoreFocus: false)
+        redoHistory.append(current.document); current.document = previous; project = current
+        if !previous.feedbacks.contains(where: { $0.id == selectedFeedbackID }) { selectedFeedbackID = previous.feedbacks.first?.id }
         selectedID = nil; editGroup = nil; updateWindow(); status = "已撤销"
     }
     func redo() {
-        guard var current = project, let items = redoHistory.popLast() else { return }
-        undoHistory.append(current.document.items); current.document.items = items; project = current
+        guard var current = project, let next = redoHistory.popLast() else { return }
+        cancelReferencePicking(restoreFocus: false)
+        undoHistory.append(current.document); current.document = next; project = current
+        if !next.feedbacks.contains(where: { $0.id == selectedFeedbackID }) { selectedFeedbackID = next.feedbacks.first?.id }
         selectedID = nil; editGroup = nil; updateWindow(); status = "已重做"
     }
 
@@ -126,9 +288,11 @@ final class EditorModel: ObservableObject {
             guard let loadedImage = NSImage(contentsOf: loaded.imageURL) else {
                 throw NSError(domain: "OneShot", code: 1, userInfo: [NSLocalizedDescriptionKey: "无法读取这份截图。"])
             }
-            project = loaded; image = loadedImage; savedItems = loaded.document.items
+            cancelReferencePicking(restoreFocus: false)
+            project = loaded; image = loadedImage; savedDocument = loaded.document
             undoHistory = []; redoHistory = []; selectedID = nil; editGroup = nil; tool = .select; zoom = 1
-            highlightedElementID = nil; elementSearch = ""; inspectorMode = "annotations"
+            highlightedElementID = nil; elementSearch = ""; inspectorMode = "feedback"
+            selectedFeedbackID = loaded.document.feedbacks.first?.id
             do { elementIndex = try CapturedElementIndex.load(from: loaded) }
             catch { elementIndex = CapturedElementIndex(elements: [], status: "无法读取控件树：\(error.localizedDescription)") }
             expandedElements = Set(elementIndex?.elements.filter { $0.depth < 3 }.map(\.id) ?? [])
@@ -140,6 +304,8 @@ final class EditorModel: ObservableObject {
     }
 
     @discardableResult func save(asNew: Bool = false) -> Bool {
+        feedbackEditor.commitEditing()
+        window?.makeFirstResponder(nil)
         guard let current = project else { return false }
         do {
             if !asNew, let destination = current.projectDirectory {
@@ -147,20 +313,22 @@ final class EditorModel: ObservableObject {
             } else {
                 let panel = NSSavePanel()
                 panel.title = "保存可继续编辑的项目"
-                panel.message = "项目包含原始截图、完整采集上下文和独立标注层。"
+                panel.message = "项目包含原始截图、完整采集上下文、反馈与控件引用，以及独立标注层。"
                 panel.nameFieldStringValue = title + ".oneshot"
                 panel.canCreateDirectories = true
                 guard panel.runModal() == .OK, let chosen = panel.url else { return false }
                 let destination = chosen.pathExtension.lowercased() == "oneshot" ? chosen : chosen.appendingPathExtension("oneshot")
                 project = try AnnotationStore.createProject(from: current, document: current.document, at: destination)
             }
-            savedItems = current.document.items; editGroup = nil; status = "已保存 \(project?.projectDirectory?.lastPathComponent ?? title)"
+            savedDocument = current.document; editGroup = nil; status = "已保存 \(project?.projectDirectory?.lastPathComponent ?? title)"
             if let project { remember(project) }
             updateWindow(); return true
         } catch { show(error); return false }
     }
 
     func exportPNG() {
+        feedbackEditor.commitEditing()
+        window?.makeFirstResponder(nil)
         guard let current = project else { return }
         let panel = NSSavePanel()
         panel.title = "导出标注图片"
@@ -180,12 +348,13 @@ final class EditorModel: ObservableObject {
 
     func exportForAgent() {
         guard project != nil, !isExportingHandoff else { return }
+        feedbackEditor.commitEditing()
         // Commit an in-progress native text edit before taking the immutable export snapshot.
         window?.makeFirstResponder(nil)
         guard let current = project else { return }
         let panel = NSSavePanel()
         panel.title = "交给 Agent"
-        panel.message = "导出当前截图、\(current.document.items.count) 条标注及完整上下文，并复制给 Agent 的说明。包含当前未保存的标注。"
+        panel.message = "导出当前截图、\(current.document.feedbacks.count) 条反馈、\(current.document.items.count) 个标注及完整上下文，并复制给 Agent 的说明。包含当前未保存的内容。"
         panel.nameFieldStringValue = title + "-agent"
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let destination = panel.url else { return }
@@ -243,10 +412,12 @@ final class EditorModel: ObservableObject {
     }
 
     func confirmUnsaved() -> Bool {
+        feedbackEditor.commitEditing()
+        window?.makeFirstResponder(nil)
         guard isDirty else { return true }
         let alert = NSAlert()
-        alert.messageText = "保存对“\(title)”的标注修改？"
-        alert.informativeText = "原始采集已保存。尚未保存的标注修改可以保存为可继续编辑的项目。"
+        alert.messageText = "保存对“\(title)”的修改？"
+        alert.informativeText = "原始采集已保存。反馈、控件引用和标注可以一起保存为可继续编辑的项目。"
         alert.addButton(withTitle: "保存"); alert.addButton(withTitle: "取消"); alert.addButton(withTitle: "不保存")
         switch alert.runModal() {
         case .alertFirstButtonReturn: return save()

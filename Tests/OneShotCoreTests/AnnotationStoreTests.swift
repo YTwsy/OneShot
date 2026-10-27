@@ -6,6 +6,76 @@ import UniformTypeIdentifiers
 @testable import OneShotCore
 
 struct AnnotationStoreTests {
+    @Test func multiControlFeedbackRoundTripsWithRepeatedReferencesAndUnchangedCapture() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let capture = try fixtureCapture(in: root)
+        try fixtureAX(in: capture)
+        let originals = try captureFiles(capture)
+        let source = try AnnotationStore.openCapture(at: capture)
+        var document = source.document
+        document.items = [AnnotationItem(kind: .number, start: .init(x: 10, y: 12), text: "保留原标注")]
+        document.feedbacks = [
+            FeedbackItem(content: [.text("希望将 "), .control(.init(nodeID: "button", label: "保存按钮")),
+                .text(" 改成 "), .control(.init(nodeID: "label", label: "说明文字")), .text(" 的样式。\n再次提到 "),
+                .control(.init(nodeID: "button", label: "保存按钮")), .text("。")]),
+            FeedbackItem(content: [.text("截图外的 "), .control(.init(nodeID: "offscreen", label: "屏幕外")), .text(" 也可引用。")]),
+            FeedbackItem(content: [.text("整体希望增加留白，不绑定具体控件。")]),
+        ]
+        let destination = root.appendingPathComponent("feedback.oneshot")
+        let project = try AnnotationStore.createProject(from: source, document: document, at: destination)
+        #expect(project.document == document)
+        #expect(project.document.feedbackControlReferences.map(\.nodeID) == ["button", "label", "offscreen"])
+        #expect(project.document.feedbackReferenceNumber(for: "button") == 1)
+        #expect(project.document.feedbackReferenceNumber(for: "offscreen") == 3)
+        #expect(project.document.feedbackReferenceNumber(for: "absent") == nil)
+        #expect(project.document.feedbacks[0].plainText == "希望将 [保存按钮] 改成 [说明文字] 的样式。\n再次提到 [保存按钮]。")
+        document.feedbacks[2].content = [.text("修改后的整体反馈")]
+        try AnnotationStore.save(document: document, in: destination)
+        let moved = root.appendingPathComponent("moved-feedback.oneshot")
+        try FileManager.default.moveItem(at: destination, to: moved)
+        try FileManager.default.removeItem(at: capture)
+        let reopened = try AnnotationStore.openProject(at: moved)
+        #expect(reopened.document == document)
+        #expect(try captureFiles(reopened.captureDirectory) == originals)
+    }
+
+    @Test func feedbackValidationRejectsAmbiguousIdentityAndUnknownFrozenNodes() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let capture = try fixtureCapture(in: root)
+        try fixtureAX(in: capture)
+        let source = try AnnotationStore.openCapture(at: capture)
+        var valid = source.document
+        let reference = FeedbackControlReference(nodeID: "button", label: "保存")
+        valid.feedbacks = [.init(content: [.control(reference)])]
+        try valid.validate()
+        var cases: [AnnotationDocument] = []
+        var invalid = valid; invalid.feedbacks.append(invalid.feedbacks[0]); cases.append(invalid)
+        invalid = valid; invalid.feedbacks[0].content.append(.control(reference)); cases.append(invalid)
+        invalid = valid; invalid.feedbacks[0].content = [.control(.init(nodeID: " ", label: "保存"))]; cases.append(invalid)
+        invalid = valid; invalid.feedbacks[0].content = [.control(.init(nodeID: "button", label: ""))]; cases.append(invalid)
+        invalid = valid; invalid.feedbacks[0].content = [.text(String(repeating: "长", count: 16_385))]; cases.append(invalid)
+        for document in cases { #expect(throws: AnnotationError.self) { try document.validate() } }
+        let destination = root.appendingPathComponent("valid-feedback.oneshot")
+        _ = try AnnotationStore.createProject(from: source, document: valid, at: destination)
+        let original = try Data(contentsOf: destination.appendingPathComponent("annotations.json"))
+        invalid = valid; invalid.feedbacks[0].content = [.control(.init(nodeID: "another-capture", label: "保存"))]
+        #expect(throws: AnnotationError.self) { try AnnotationStore.save(document: invalid, in: destination) }
+        #expect(try Data(contentsOf: destination.appendingPathComponent("annotations.json")) == original)
+    }
+
+    @Test func documentsCreatedBeforeFeedbackFeatureDecodeAsEmptyFeedbacks() throws {
+        let document = AnnotationDocument(sourceCaptureID: "old-capture", imageWidth: 64, imageHeight: 48,
+            items: [.init(kind: .number, start: .init(x: 10, y: 12), number: 4)])
+        var old = try JSONSerialization.jsonObject(with: SnapshotStore.encoder.encode(document)) as! [String: Any]
+        old.removeValue(forKey: "feedbacks")
+        let decoded = try JSONDecoder().decode(AnnotationDocument.self, from: JSONSerialization.data(withJSONObject: old))
+        #expect(decoded == document)
+        #expect(decoded.feedbacks.isEmpty)
+        try decoded.validate()
+    }
+
     @Test func editableProjectKeepsOriginalBytesAndReopensAfterMovingWithoutSource() throws {
         let root = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

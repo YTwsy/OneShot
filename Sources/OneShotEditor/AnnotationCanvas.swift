@@ -46,6 +46,10 @@ struct AnnotationCanvas: NSViewRepresentable {
     var onRedo: () -> Void = {}
     var canUndo: Bool = true
     var canRedo: Bool = true
+    var isPickingReference: Bool = false
+    var onReferencePick: (String) -> Void = { _ in }
+    var onCancelReferencePick: () -> Void = {}
+    var onFeedbackReferenceSelect: (String) -> Void = { _ in }
 
     func makeNSView(context: Context) -> AnnotationScrollView {
         let scroll = AnnotationScrollView()
@@ -119,6 +123,10 @@ final class AnnotationDrawingView: NSView, NSUserInterfaceValidations {
     private var highlightedElementID: String?
     private var hoveredElementID: String?
     private var onElementSelect: (String) -> Void = { _ in }
+    private var isPickingReference = false
+    private var onReferencePick: (String) -> Void = { _ in }
+    private var onCancelReferencePick: () -> Void = {}
+    private var onFeedbackReferenceSelect: (String) -> Void = { _ in }
     private var hoverTrackingArea: NSTrackingArea?
     private var localMouseMonitor: Any?
     private var drag: Drag?
@@ -138,7 +146,7 @@ final class AnnotationDrawingView: NSView, NSUserInterfaceValidations {
     }
 
     func configure(from configuration: AnnotationCanvas) {
-        if document?.id != configuration.document.id || tool != configuration.tool {
+        if document?.id != configuration.document.id || tool != configuration.tool || isPickingReference != configuration.isPickingReference {
             hoveredElementID = nil
             toolTip = nil
         }
@@ -162,6 +170,10 @@ final class AnnotationDrawingView: NSView, NSUserInterfaceValidations {
         elementIndex = configuration.elementIndex
         highlightedElementID = configuration.highlightedElementID
         onElementSelect = configuration.onElementSelect
+        isPickingReference = configuration.isPickingReference
+        onReferencePick = configuration.onReferencePick
+        onCancelReferencePick = configuration.onCancelReferencePick
+        onFeedbackReferenceSelect = configuration.onFeedbackReferenceSelect
         clearHoverIfMouseOutside()
         setAccessibilityRole(.image)
         setAccessibilityLabel("截图标注画布，\(configuration.document.items.count) 个标注")
@@ -170,7 +182,7 @@ final class AnnotationDrawingView: NSView, NSUserInterfaceValidations {
     }
 
     override func resetCursorRects() {
-        addCursorRect(imageRect, cursor: tool == .select ? .arrow : .crosshair)
+        addCursorRect(imageRect, cursor: tool == .select && !isPickingReference ? .arrow : .crosshair)
     }
 
     override func viewDidMoveToWindow() {
@@ -228,7 +240,7 @@ final class AnnotationDrawingView: NSView, NSUserInterfaceValidations {
     }
 
     private func updateHoveredElement(_ event: NSEvent) {
-        guard tool == .element else { return }
+        guard tool == .element || isPickingReference else { return }
         let element = imagePoint(for: event, clamp: false).flatMap {
             elementIndex?.hitTest(point: AnnotationPoint(x: $0.x, y: $0.y))
         }
@@ -255,6 +267,10 @@ final class AnnotationDrawingView: NSView, NSUserInterfaceValidations {
         (scaled as NSAffineTransform).concat()
         let items = previewItems ?? document.items
         AnnotationRenderer.draw(items: items, imageSize: imageSize)
+        if let elementIndex {
+            AnnotationRenderer.drawFeedbackReferences(document: document, elementIndex: elementIndex,
+                imageSize: imageSize, scale: scale, highlightedNodeID: highlightedElementID)
+        }
         if let selected = items.first(where: { $0.id == selectedID }),
            selected.kind != .element || (selected.start.x != selected.end.x && selected.start.y != selected.end.y) {
             let selection = AnnotationRenderer.bounds(for: selected, imageSize: imageSize)
@@ -266,11 +282,12 @@ final class AnnotationDrawingView: NSView, NSUserInterfaceValidations {
             path.stroke()
         }
         if let id = highlightedElementID,
-           id != (tool == .element ? hoveredElementID : nil),
+           id != (tool == .element || isPickingReference ? hoveredElementID : nil),
+           (tool == .element || isPickingReference || !document.feedbackControlReferences.contains(where: { $0.nodeID == id })),
            let element = elementIndex?.element(id: id) {
             drawElementHighlight(element, showLabel: hoveredElementID == nil)
         }
-        if tool == .element, let id = hoveredElementID, let element = elementIndex?.element(id: id) {
+        if tool == .element || isPickingReference, let id = hoveredElementID, let element = elementIndex?.element(id: id) {
             drawElementHighlight(element, showLabel: true)
         }
         NSGraphicsContext.restoreGraphicsState()
@@ -289,7 +306,7 @@ final class AnnotationDrawingView: NSView, NSUserInterfaceValidations {
         NSColor.systemBlue.setStroke()
         border.stroke()
         guard showLabel else { return }
-        let label = "\(element.role) · \(String(element.label.prefix(70)))" as NSString
+        let label = (element.label.isEmpty ? "未命名控件" : String(element.label.prefix(70))) as NSString
         let attributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 12 / scale, weight: .medium),
             .foregroundColor: NSColor.white,
@@ -306,6 +323,13 @@ final class AnnotationDrawingView: NSView, NSUserInterfaceValidations {
     }
 
     override func mouseDown(with event: NSEvent) {
+        if isPickingReference {
+            guard let point = imagePoint(for: event, clamp: false),
+                  let element = elementIndex?.hitTest(point: AnnotationPoint(x: point.x, y: point.y)) else { return }
+            onReferencePick(element.id)
+            clearHover()
+            return
+        }
         window?.makeFirstResponder(self)
         guard let document, let point = imagePoint(for: event, clamp: false) else { return }
         var items = document.items
@@ -317,8 +341,16 @@ final class AnnotationDrawingView: NSView, NSUserInterfaceValidations {
             return
         }
         if tool == .select {
+            if let reference = feedbackReference(at: point, badgesOnly: true) {
+                onFeedbackReferenceSelect(reference)
+                return
+            }
             let hit = items.indices.reversed().first {
                 AnnotationRenderer.hitTest(point, item: items[$0], imageSize: imageSize, tolerance: 8 / scale)
+            }
+            if hit == nil, let reference = feedbackReference(at: point, badgesOnly: false) {
+                onFeedbackReferenceSelect(reference)
+                return
             }
             selectedID = hit.map { items[$0].id }
             drag = hit.flatMap {
@@ -385,12 +417,24 @@ final class AnnotationDrawingView: NSView, NSUserInterfaceValidations {
         if event.keyCode == 51 || event.keyCode == 117 {
             if selectedID != nil { onDelete() }
         } else if event.keyCode == 53 {
+            if isPickingReference { onCancelReferencePick(); clearHover(); return }
             drag = nil
             previewItems = nil
             selectedID = nil
             onSelect(nil)
             needsDisplay = true
         } else { super.keyDown(with: event) }
+    }
+
+    private func feedbackReference(at point: CGPoint, badgesOnly: Bool) -> String? {
+        guard let document, let elementIndex else { return nil }
+        for (offset, reference) in document.feedbackControlReferences.enumerated().reversed() {
+            guard let bounds = elementIndex.element(id: reference.nodeID)?.imageBounds else { continue }
+            let marker = AnnotationRenderer.feedbackReferenceBadgeBounds(number: offset + 1,
+                elementBounds: bounds, imageSize: imageSize, scale: scale)
+            if marker.contains(point) || (!badgesOnly && bounds.cgRect.contains(point)) { return reference.nodeID }
+        }
+        return nil
     }
 
     // These actions participate only while the canvas is in the responder chain. Native

@@ -6,6 +6,50 @@ import UniformTypeIdentifiers
 @testable import OneShotCore
 
 struct AgentHandoffStoreTests {
+    @Test func feedbackExportKeepsOrderedOccurrencesAndAllFrozenNodes() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var source = try fixture(in: root)
+        let axURL = source.captureDirectory.appendingPathComponent("accessibility.json")
+        var ax = try JSONSerialization.jsonObject(with: Data(contentsOf: axURL)) as! [String: Any]
+        var nodes = ax["nodes"] as! [[String: Any]]
+        nodes.append(["id": "offscreen", "depth": 1, "attributes": [
+            "AXRole": ["status": "ok", "value": ["text": "AXStaticText"]],
+            "AXTitle": ["status": "ok", "value": ["text": "屏幕外参考"]],
+            "AXFrame": ["status": "ok", "value": ["components": ["x": 500, "y": 500, "width": 10, "height": 10]]]],
+            "futureField": ["extra": "完整保留"]])
+        ax["nodes"] = nodes
+        try JSONSerialization.data(withJSONObject: ax).write(to: axURL)
+        let originalAX = try Data(contentsOf: axURL)
+        let originalImage = try Data(contentsOf: source.imageURL)
+        source.document.feedbacks = [.init(content: [.text("将 "),
+            .control(.init(nodeID: "button-42", label: "保存按钮")), .text(" 改得像 "),
+            .control(.init(nodeID: "offscreen", label: "屏幕外参考")), .text("，并保持 "),
+            .control(.init(nodeID: "button-42", label: "保存按钮")), .text(" 的行为。")]),
+            .init(content: [.text("整体希望更清晰。")])]
+        let exported = try AgentHandoffStore.export(project: source, to: root.appendingPathComponent("multi-reference"))
+        let handoff = try decode(exported.directory)
+        #expect(handoff.annotations.isEmpty)
+        #expect(handoff.feedbacks.map(\.feedback) == source.document.feedbacks)
+        #expect(handoff.feedbacks.map(\.order) == [1, 2])
+        let references = handoff.feedbacks[0].references
+        #expect(references.map(\.referenceNumber) == [1, 2, 1])
+        #expect(references.map(\.imageBadgeNumber) == [1, nil, 1])
+        #expect(references.map { $0.reference.nodeID } == ["button-42", "offscreen", "button-42"])
+        #expect(references[0].targetNode?["attributes"]?["AXEnabled"]?["value"]?["boolean"] == .boolean(false))
+        #expect(references[1].targetNode?["futureField"]?["extra"]?.stringValue == "完整保留")
+        #expect(handoff.feedbacks[1].references.isEmpty)
+        let brief = try String(contentsOf: exported.briefURL, encoding: .utf8)
+        #expect(brief.contains("将 [R1 · 保存按钮] 改得像 [R2 · 屏幕外参考]，并保持 [R1 · 保存按钮] 的行为。"))
+        #expect(brief.contains("截图外或没有可定位坐标"))
+        #expect(brief.contains("整体希望更清晰。"))
+        #expect(!brief.contains("本次没有标注。"))
+        #expect(try Data(contentsOf: axURL) == originalAX)
+        #expect(try Data(contentsOf: source.imageURL) == originalImage)
+        let reopened = try AnnotationStore.openProject(at: exported.directory.appendingPathComponent("source.oneshot"))
+        #expect(reopened.document == source.document)
+    }
+
     @Test func encodedHandoffBudgetAcceptsCompleteBoundaryAndNeverClipsJSON() throws {
         let root = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

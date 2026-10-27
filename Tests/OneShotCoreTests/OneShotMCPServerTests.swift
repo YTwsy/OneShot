@@ -83,7 +83,7 @@ struct OneShotMCPServerTests {
         #expect(server.handle(try JSONSerialization.data(withJSONObject: ["jsonrpc": "2.0", "method": "notifications/initialized"])) == nil)
         let tools = try request(server, method: "tools/list")
         let names = try #require(((tools["result"] as? [String: Any])?["tools"] as? [[String: Any]])?.compactMap { $0["name"] as? String })
-        #expect(Set(names) == ["read_brief", "read_annotations", "read_annotation", "read_context", "read_image"])
+        #expect(Set(names) == ["read_brief", "read_annotations", "read_annotation", "read_feedbacks", "read_feedback", "read_context", "read_image"])
         let brief = try call(server, name: "read_brief")
         #expect(try textObject(brief)["text"] as? String == reader.readBrief().text)
         #expect(try textObject(brief)["captureID"] as? String == "capture-test")
@@ -212,6 +212,138 @@ struct OneShotMCPServerTests {
         #expect(throws: (any Error).self) { try ReadonlyHandoffReader(directory: exported.directory) }
         try original.write(to: path)
         #expect(try ReadonlyHandoffReader(directory: exported.directory).readAnnotations()["totalAnnotations"] as? Int == 1)
+    }
+
+    @Test func feedbackMCPReassemblesOrderedMultiControlReferencesAndGlobalFeedback() throws {
+        let fixture = AgentHandoffStoreTests()
+        let root = try fixture.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = try feedbackFixture(in: root)
+        let exported = try AgentHandoffStore.export(project: source, to: root.appendingPathComponent("feedback-handoff"))
+        let reader = try ReadonlyHandoffReader(directory: exported.directory)
+        let server = OneShotMCPServer(reader: reader)
+        _ = try request(server, method: "initialize", params: initialization(version: "2025-06-18"))
+        _ = server.handle(try JSONSerialization.data(withJSONObject: ["jsonrpc": "2.0", "method": "notifications/initialized"]))
+        let index = try textObject(call(server, name: "read_feedbacks", arguments: ["limit": 1]))
+        #expect(index["totalFeedbacks"] as? Int == 2)
+        #expect(index["nextOffset"] as? Int == 1)
+        #expect(index["hasMore"] as? Bool == true)
+        let row = try #require((index["feedbacks"] as? [[String: Any]])?.first)
+        #expect(row["feedbackID"] as? String == source.document.feedbacks[0].id.uuidString)
+        #expect((row["userNote"] as? String)?.utf8.count ?? Int.max <= 1_600)
+        #expect(row["userNoteTruncated"] as? Bool == true)
+        let references = try #require(row["references"] as? [[String: Any]])
+        #expect(references.compactMap { $0["nodeID"] as? String } == ["button-42", "second-button", "button-42"])
+        #expect(references.compactMap { $0["reference"] as? String } == ["R1", "R2", "R1"])
+        var json = "", next = 0
+        repeat {
+            let result = try textObject(call(server, name: "read_feedback", arguments: ["order": 1, "offset": next, "limit": 53]))
+            json += try #require(result["text"] as? String)
+            next = try #require(result["nextOffset"] as? Int)
+            if result["hasMore"] as? Bool == false { break }
+        } while true
+        let full = try JSONDecoder().decode(AgentHandoffFeedback.self, from: Data(json.utf8))
+        #expect(full.feedback == source.document.feedbacks[0])
+        #expect(full.references.map(\.reference) == source.document.feedbacks[0].controlReferences)
+        #expect(full.references.map { $0.targetNode?["id"]?.stringValue } == ["button-42", "second-button", "button-42"])
+        #expect(full.references[0].targetNode?["attributes"]?["AXEnabled"]?["value"]?["boolean"] == .boolean(false))
+        #expect(try reader.readFeedback(id: full.feedback.id, limit: 65_536).source == "feedback:1")
+        let second = try JSONDecoder().decode(AgentHandoffFeedback.self,
+            from: Data(reader.readFeedback(order: 2, limit: 65_536).text.utf8))
+        #expect(second.feedback == source.document.feedbacks[1])
+        #expect(second.references.isEmpty)
+        #expect(try reader.readAnnotations()["totalFeedbacks"] as? Int == 2)
+    }
+
+    @Test func feedbackReaderRejectsTamperedReferenceAndStaleCachedData() throws {
+        let fixture = AgentHandoffStoreTests()
+        let root = try fixture.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let exported = try AgentHandoffStore.export(project: feedbackFixture(in: root), to: root.appendingPathComponent("feedback-handoff"))
+        let path = exported.directory.appendingPathComponent("handoff.json")
+        let original = try Data(contentsOf: path)
+        let reader = try ReadonlyHandoffReader(directory: exported.directory)
+        _ = try reader.readFeedback(order: 1, limit: 65_536)
+        _ = try reader.readFeedback(order: 2, limit: 65_536)
+        var base = try #require(JSONSerialization.jsonObject(with: original) as? [String: Any])
+        var feedbacks = try #require(base["feedbacks"] as? [[String: Any]])
+        var bindings = try #require(feedbacks[0]["references"] as? [[String: Any]])
+        bindings[0]["targetRole"] = "AXWrongRole"
+        feedbacks[0]["references"] = bindings; base["feedbacks"] = feedbacks
+        try JSONSerialization.data(withJSONObject: base).write(to: path)
+        #expect(throws: (any Error).self) { try ReadonlyHandoffReader(directory: exported.directory) }
+        #expect(throws: HandoffReadError.self) { try reader.readFeedback(order: 1, limit: 65_536) }
+        #expect(throws: HandoffReadError.self) { try reader.readFeedbacks() }
+        try original.write(to: path)
+        var missingBindings = try #require(JSONSerialization.jsonObject(with: original) as? [String: Any])
+        feedbacks = try #require(missingBindings["feedbacks"] as? [[String: Any]])
+        feedbacks[0]["references"] = []
+        missingBindings["feedbacks"] = feedbacks
+        try JSONSerialization.data(withJSONObject: missingBindings).write(to: path)
+        #expect(throws: (any Error).self) { try ReadonlyHandoffReader(directory: exported.directory) }
+    }
+
+    @Test func feedbackIndexBoundsReferencePreviewsAndFullReadKeepsEveryOccurrence() throws {
+        let fixture = AgentHandoffStoreTests()
+        let root = try fixture.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var source = try feedbackFixture(in: root)
+        source.document.feedbacks[0].content += (0..<10).map { _ in
+            .control(FeedbackControlReference(nodeID: "second-button", label: String(repeating: "中文标签", count: 60)))
+        }
+        let exported = try AgentHandoffStore.export(project: source, to: root.appendingPathComponent("feedback-handoff"))
+        let reader = try ReadonlyHandoffReader(directory: exported.directory)
+        let row = try #require((reader.readFeedbacks()["feedbacks"] as? [[String: Any]])?.first)
+        #expect(row["referenceCount"] as? Int == 13)
+        #expect(row["referencesTruncated"] as? Bool == true)
+        #expect((row["references"] as? [[String: Any]])?.count == 8)
+        let full = try JSONDecoder().decode(AgentHandoffFeedback.self,
+            from: Data(reader.readFeedback(order: 1, limit: 65_536).text.utf8))
+        #expect(full.references.count == 13)
+        #expect(full.feedback == source.document.feedbacks[0])
+    }
+
+    @Test func legacyHandoffWithoutFeedbackRemainsReadableAndFeedbackArgumentsAreBounded() throws {
+        let fixture = AgentHandoffStoreTests()
+        let root = try fixture.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let exported = try AgentHandoffStore.export(project: fixture.fixture(in: root), to: root.appendingPathComponent("old-handoff"))
+        for relative in ["handoff.json", "source.oneshot/annotations.json"] {
+            let path = exported.directory.appendingPathComponent(relative)
+            var object = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: path)) as? [String: Any])
+            object.removeValue(forKey: "feedbacks")
+            try JSONSerialization.data(withJSONObject: object).write(to: path)
+        }
+        let reader = try ReadonlyHandoffReader(directory: exported.directory)
+        #expect(reader.document.feedbacks.isEmpty)
+        #expect(try reader.readFeedbacks()["totalFeedbacks"] as? Int == 0)
+        #expect(throws: HandoffReadError.self) { try reader.readFeedback(order: 1) }
+        let server = OneShotMCPServer(reader: reader)
+        _ = try request(server, method: "initialize", params: initialization(version: "2025-06-18"))
+        _ = server.handle(try JSONSerialization.data(withJSONObject: ["jsonrpc": "2.0", "method": "notifications/initialized"]))
+        for (name, args) in [("read_feedback", ["order": true]), ("read_feedback", ["order": 0]),
+                             ("read_feedback", ["order": 1, "path": "/etc/passwd"]),
+                             ("read_feedbacks", ["offset": -1]), ("read_feedbacks", ["limit": 101])] as [(String, [String: Any])] {
+            let response = try request(server, method: "tools/call", params: ["name": name, "arguments": args])
+            #expect((response["error"] as? [String: Any])?["code"] as? Int == -32602)
+        }
+    }
+
+    private func feedbackFixture(in root: URL) throws -> AnnotationProject {
+        var source = try AgentHandoffStoreTests().fixture(in: root)
+        let axURL = source.captureDirectory.appendingPathComponent("accessibility.json")
+        var raw = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: axURL)) as? [String: Any])
+        var nodes = try #require(raw["nodes"] as? [[String: Any]])
+        var second = nodes[0]; second["id"] = "second-button"
+        nodes.append(second); raw["nodes"] = nodes
+        try JSONSerialization.data(withJSONObject: raw).write(to: axURL)
+        source.document.feedbacks = [FeedbackItem(content: [
+            .text("希望把 "), .control(FeedbackControlReference(nodeID: "button-42", label: "保存按钮")),
+            .text(" 改成 "), .control(FeedbackControlReference(nodeID: "second-button", label: "发布按钮")),
+            .text(" 的样式。\n" + String(repeating: "中文🙂细节 ", count: 200)),
+            .control(FeedbackControlReference(nodeID: "button-42", label: "保存按钮")),
+        ]), FeedbackItem(content: [.text("整体留白需要更舒适。")])]
+        return source
     }
 
     private func initialization(version: String) -> [String: Any] {
