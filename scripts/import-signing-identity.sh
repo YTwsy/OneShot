@@ -64,7 +64,7 @@ try:
         env_path = Path(args.github_env)
         if not env_path.is_absolute() or env_path.is_symlink() or not env_path.is_file():
             fail("--github-env must name an existing, regular absolute file.")
-    mode = os.environ.get("ONESHOT_SIGNING_MODE", "developer-id")
+    mode = os.environ.get("ONESHOT_SIGNING_MODE", "apple-development")
     if mode not in ("self-signed", "apple-development", "developer-id"):
         fail("ONESHOT_SIGNING_MODE must select a reusable certificate mode.")
     selector = os.environ.get("ONESHOT_SIGNING_IDENTITY", "")

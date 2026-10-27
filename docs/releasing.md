@@ -24,8 +24,8 @@ OneShot.app/
 | 签名模式 | 适用范围 | 更新边界 |
 | --- | --- | --- |
 | `self-signed` | 固定自签根证书，用于受控测试 | 显式 DR 绑定组件 ID 与证书指纹，须复用同一证书及私钥；权限行为需实机验证 |
-| `apple-development` | 本地开发与测试 | 使用 Apple Development 身份，校验真实 Apple 证书链和 Team ID |
-| `developer-id`（默认） | 面向分发的签名 | 使用 Developer ID Application 身份及安全时间戳；当前流程仍不执行公证 |
+| `apple-development`（当前默认） | 本地开发与升级权限验证 | 使用 Apple Development 身份，校验真实 Apple 证书链和 Team ID |
+| `developer-id` | 面向分发的签名 | 使用 Developer ID Application 身份及安全时间戳；当前流程仍不执行公证 |
 | `ad-hoc` | 明确选择的临时包 | 代码变化会改变身份要求，不能作为保持升级权限的方案 |
 
 Apple 说明隐私权限依赖代码身份要求；自签证书是否被某个子系统接受还取决于该子系统的策略。DR 检查通过只是升级验收的一部分，不能证明用户 Mac 已保留屏幕录制或辅助功能授权。见 [TN3127](https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements)、[TN2206](https://developer.apple.com/library/archive/technotes/tn2206/)。
@@ -36,24 +36,34 @@ Apple 说明隐私权限依赖代码身份要求；自签证书是否被某个�
 
 ## 本地构建
 
+当前采用 Apple Development 验证本机升级。先在钥匙串中准备 Apple 签发的开发证书及对应私钥，再运行：
+
+```sh
+security find-identity -v -p codesigning
+```
+
+只有 `.cer`、没有对应私钥，不能用于签名。如果已有另一台 Mac 导出的开发签名身份，可将带私钥的 P12 导入本机钥匙串；不要每次出包重新创建证书。没有现有身份时，通过完整 Xcode 的 Settings → Accounts 添加 Apple 账户，选择团队，在 Manage Certificates 中创建 Apple Development。免费账户可使用 Personal Team，见 Apple 的[签名工作流](https://help.apple.com/xcode/mac/current/en.lproj/dev60b6fbbc7.html)与[证书管理](https://help.apple.com/xcode/mac/current/en.lproj/dev154b28f09.html)。账户登录及双重认证由用户完成。
+
+当前验证机器运行 macOS 14.8.5；Apple 的[兼容表](https://developer.apple.com/xcode/system-requirements)列明 Xcode 16.2 支持 macOS 14.5 起的 Sonoma。需要此旧版时从 [Apple Developer 下载页](https://developer.apple.com/download/all/?q=Xcode%2016.2)取得，不直接假设 App Store 最新版兼容。Xcode 可只用于配置签名账户，无须为本流程更改全局 `xcode-select`。
+
 先测试并提交准备出包的源码，构建脚本从干净 Git 提交导出隔离源码。证书和私钥留在钥匙串中；身份参数使用 `security find-identity -p codesigning` 对应的 **40 位证书 SHA1**。
 
 ```sh
 export ONESHOT_SIGNING_IDENTITY='<40-character-certificate-SHA1>'
 zsh scripts/build-release.sh --version 0.1.0-alpha.1 --build-number 5 --ref HEAD \
-  --signing-mode developer-id
+  --signing-mode apple-development
 ```
 
 已有证书签名的授权基线时，增加 `--previous-app /Applications/OneShot.app`。这是阻断式检查：新旧三个组件必须互相满足对方的 DR，否则不生成交付包。从旧 ad-hoc 迁移到证书身份时，预期不兼容，需要首次重新授权；迁移包应省略此参数，并在发布说明中明确迁移边界。后续升级再以已授权的证书版本为基线。
 
-Apple Development 测试身份使用 `--signing-mode apple-development`；Apple 模式建议传 `--expected-team-id <TEAMID>`。指定非默认钥匙串时增加 `--signing-keychain /absolute/signing.keychain-db`。证书模式缺少身份、签名失败或证书类型不匹配都会停止，不回退到 ad-hoc。临时包必须显式传 `--signing-mode ad-hoc`，且不能同时指定证书。
+当前按 Apple Development 路线验证本机升级权限。Apple 模式建议传 `--expected-team-id <TEAMID>`。将来准备分发时可显式改用 `--signing-mode developer-id` 并单独完成相应验收。指定非默认钥匙串时增加 `--signing-keychain /absolute/signing.keychain-db`。证书模式缺少身份、签名失败或证书类型不匹配都会停止，不回退到 ad-hoc。临时包必须显式传 `--signing-mode ad-hoc`，且不能同时指定证书。
 
 产物目录为 `artifacts/OneShot-<version>-build<build>-<commit12>-<mode>/`，包含 App、DMG、SHA-256、源码归档、`code-signing.json` 和 `release-manifest.json`；有升级基线时另含 `identity-compatibility.json`。已有目录不覆盖。清单记录真实签名方式、各组件证书 SHA256、Team ID、DR、源码提交及 `permissionContinuity: not-verified`，不会把签名成功写成授权成功。关于窗口和安装说明也显示对应签名状态。
 
 可独立检查现有包或比较两个包：
 
 ```sh
-python3 packaging/signing.py verify --app /absolute/OneShot.app --signing-mode developer-id
+python3 packaging/signing.py verify --app /absolute/OneShot.app --signing-mode apple-development
 python3 packaging/signing.py compare \
   --previous-app /absolute/old/OneShot.app --candidate-app /absolute/new/OneShot.app
 ```
@@ -72,7 +82,7 @@ python3 packaging/signing.py compare \
 
 不要把 P12、私钥、导出密码或 Base64 内容放进仓库、构建参数、日志或产物。工作流将既有身份导入 runner 的临时钥匙串，保留原有查找项并添加本次钥匙串，所有签名显式指定此钥匙串；不会生成替代发布证书，不改变全局信任或用户默认钥匙串。任务结束移除本次钥匙串及查找项，保留其他条目；上传清单只包含公开构建结果。GitHub 官方流程见[在 Actions 中签名 Xcode 应用](https://docs.github.com/en/actions/how-tos/deploy/deploy-to-third-party-platforms/sign-xcode-applications)。
 
-Apple 模式可在 environment Variables 设置 `ONESHOT_EXPECTED_TEAM_ID`，用于核对预期团队；自签模式不设置此变量。手动运行时填写版本、构建号和签名模式，默认 `developer-id`。选择 `self-signed` 时使用满足上述约束的固定证书；它不会获得系统全局信任。`baseline_run_id` 可选：填入同一仓库前一次成功证书构建的 run ID，下载其 App 作为 DR 基线。首次证书构建留空，报告应显示未做基线检查。旧产物过期、签名模式或身份不兼容时修复基线或身份配置，不跳过失败冒充升级通过。
+Apple 模式可在 environment Variables 设置 `ONESHOT_EXPECTED_TEAM_ID`，用于核对预期团队；自签模式不设置此变量。手动运行时填写版本、构建号和签名模式，当前默认 `apple-development`。选择 `self-signed` 时使用满足上述约束的固定证书；它不会获得系统全局信任。`baseline_run_id` 可选：填入同一仓库前一次成功证书构建的 run ID，下载其 App 作为 DR 基线。首次证书构建留空，报告应显示未做基线检查。旧产物过期、签名模式或身份不兼容时修复基线或身份配置，不跳过失败冒充升级通过。
 
 工作流的 App 使用 tar 归档保留可执行权限，当前布局不需要 App 内符号链接，基线解包拒绝链接与越界路径。产物名包含 run ID 和 attempt；DMG、校验和及报告一起上传。CI runner 换机器不影响证书身份，用户授权仍保存在用户 Mac 上。证书轮换需要重新比较兼容性；固定自签证书的 leaf 指纹改变会失败。
 

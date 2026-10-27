@@ -20,11 +20,11 @@ on:
       signing_mode:
         description: Reusable certificate mode; self-signed uses a fixed root and pinned identity
         required: true
-        default: developer-id
+        default: apple-development
         type: choice
         options:
-          - developer-id
           - apple-development
+          - developer-id
           - self-signed
       baseline_run_id:
         description: Optional successful run of this workflow to compare component code requirements
