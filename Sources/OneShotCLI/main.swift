@@ -224,7 +224,18 @@ struct OneShotCLI {
     }
 
     static func doctor(_ args: Arguments) throws {
+        func bundleMetadataValue(_ key: String) -> String {
+            guard let value = Bundle.main.object(forInfoDictionaryKey: key) as? String else { return "unknown" }
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? "unknown" : trimmed
+        }
+        let releaseTag = bundleMetadataValue("OneShotReleaseTag")
+        let releaseVersion = releaseTag.hasPrefix("v") ? String(releaseTag.dropFirst()) : releaseTag
         var result: [String: String] = [
+            "releaseVersion": releaseVersion.isEmpty ? "unknown" : releaseVersion,
+            "buildNumber": bundleMetadataValue("CFBundleVersion"),
+            "sourceCommit": bundleMetadataValue("OneShotSourceCommit"),
+            "signingMode": bundleMetadataValue("OneShotSigningMode"),
             "os": ProcessInfo.processInfo.operatingSystemVersionString,
             "executable": Bundle.main.executableURL?.path ?? CommandLine.arguments[0],
             "accessibility": AXIsProcessTrusted() ? "granted" : "not_granted",
