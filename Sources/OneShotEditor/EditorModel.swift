@@ -34,8 +34,10 @@ final class EditorModel: ObservableObject {
     @Published private(set) var publishedHandoff: PublishedHandoff?
     @Published private(set) var publishedHistory: [PublishedHandoff] = []
     @Published var agentConnectionPresented = false
-    @Published var agentConnectionMessage = "首次在 Agent 中添加连接，以后交付不需要更改配置。"
+    @Published var agentConnectionMessage = "首次选择客户端并连接，以后交付不需要更改配置。"
     @Published private(set) var isCheckingAgentConnection = false
+    @Published private(set) var harnessStatuses: [AgentHarness: HarnessConnectionStatus] = [:]
+    @Published private(set) var isManagingHarness = false
     let handoffLibrary: HandoffLibrary
     private let recentStore: RecentCapturesStore
     private var savedDocument: AnnotationDocument?
@@ -434,6 +436,64 @@ final class EditorModel: ObservableObject {
     func showAgentConnection() {
         refreshPublishedHistory()
         agentConnectionPresented = true
+        refreshHarnessConnections()
+    }
+
+    private var harnessManager: HarnessConnectionManager {
+        var preferred: [AgentHarness: URL] = [:]
+        for harness in AgentHarness.allCases {
+            if let path = UserDefaults.standard.string(forKey: "harnessCLI.\(harness.rawValue)") {
+                preferred[harness] = URL(fileURLWithPath: path)
+            }
+        }
+        return HarnessConnectionManager(executable: mcpExecutable, library: mcpLibraryOverride, preferredCLIs: preferred)
+    }
+
+    func refreshHarnessConnections() {
+        guard !isManagingHarness else { return }
+        isManagingHarness = true
+        let manager = harnessManager
+        Task {
+            harnessStatuses = await Task.detached {
+                Dictionary(uniqueKeysWithValues: AgentHarness.allCases.map { ($0, manager.inspect($0)) })
+            }.value
+            isManagingHarness = false
+        }
+    }
+
+    func chooseHarnessCLI(_ harness: AgentHarness) {
+        let panel = NSOpenPanel()
+        panel.title = "选择 \(harness.title) CLI 程序"
+        panel.canChooseDirectories = false; panel.allowsMultipleSelection = false
+        panel.showsHiddenFiles = true; panel.treatsFilePackagesAsDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard FileManager.default.isExecutableFile(atPath: url.path) else {
+            agentConnectionMessage = "所选文件不可执行，请选择 \(harness.command) 程序。"; return
+        }
+        UserDefaults.standard.set(url.path, forKey: "harnessCLI.\(harness.rawValue)")
+        refreshHarnessConnections()
+    }
+
+    func configureHarness(_ harness: AgentHarness, removing: Bool = false) {
+        guard !isManagingHarness else { return }
+        isManagingHarness = true
+        agentConnectionMessage = removing ? "正在移除 \(harness.title) 的 OneShot 连接…" : "正在配置 \(harness.title)…"
+        let manager = harnessManager
+        Task {
+            do {
+                let backup = try await Task.detached {
+                    try removing ? manager.remove(harness) : manager.connect(harness)
+                }.value
+                agentConnectionMessage = removing
+                    ? "已移除 \(harness.title) 的用户级 OneShot 配置。已有会话请重启连接；交付材料仍保留。"
+                    : "\(harness.title) 配置已写入，本地服务检查通过。请在客户端重启 MCP 连接或开始新会话；尚未确认 Agent 已连接。"
+                if let backup { agentConnectionMessage += "\n原配置备份：\(backup.path)" }
+            } catch { agentConnectionMessage = error.localizedDescription }
+            harnessStatuses = await Task.detached {
+                Dictionary(uniqueKeysWithValues: AgentHarness.allCases.map { ($0, manager.inspect($0)) })
+            }.value
+            isManagingHarness = false
+        }
     }
 
     func refreshPublishedHistory() {
@@ -471,7 +531,7 @@ final class EditorModel: ObservableObject {
         Task {
             do {
                 try await Task.detached { try MCPConnectionConfiguration.check(executable: executable, library: directory) }.value
-                agentConnectionMessage = "本地服务检查通过。请在 Agent 中添加配置并连接；此检查不代表 Agent 已连接。"
+                agentConnectionMessage = "本地服务检查通过。此检查不代表 Agent 已连接；配置后请在客户端重新连接或开始新会话。"
             } catch { agentConnectionMessage = error.localizedDescription }
             isCheckingAgentConnection = false
         }
