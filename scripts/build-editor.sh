@@ -5,9 +5,12 @@ cd "$oneshot_root"
 export CLANG_MODULE_CACHE_PATH="$oneshot_root/.build/clang-module-cache"
 export SWIFT_MODULECACHE_PATH="$oneshot_root/.build/swift-module-cache"
 swift build --disable-sandbox --product oneshot-editor
+swift build --disable-sandbox --product oneshot-mcp
 oneshot_editor_bundle="$oneshot_root/.build/OneShot Editor.app"
-mkdir -p "$oneshot_editor_bundle/Contents/MacOS"
+mkdir -p "$oneshot_editor_bundle/Contents/MacOS" "$oneshot_editor_bundle/Contents/Helpers"
 cp .build/debug/oneshot-editor "$oneshot_editor_bundle/Contents/MacOS/oneshot-editor"
+cp .build/debug/oneshot-mcp "$oneshot_editor_bundle/Contents/Helpers/oneshot-mcp"
+codesign --force --sign "${ONESHOT_SIGN_IDENTITY:--}" --identifier dev.oneshot.mcp "$oneshot_editor_bundle/Contents/Helpers/oneshot-mcp"
 cat > "$oneshot_editor_bundle/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

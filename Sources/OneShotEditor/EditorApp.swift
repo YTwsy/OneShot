@@ -106,6 +106,7 @@ final class EditorDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         let application = NSMenuItem(); bar.addItem(application)
         let appMenu = NSMenu(); application.submenu = appMenu
         add(appMenu, "关于 OneShot", #selector(showAbout), "")
+        add(appMenu, "Agent 连接与材料…", #selector(showAgentConnection), ",")
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "退出 OneShot", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let file = NSMenuItem(); file.title = "文件"; file.submenu = NSMenu(title: "文件"); bar.addItem(file)
@@ -118,6 +119,7 @@ final class EditorDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         add(file.submenu!, "另存为…", #selector(saveAsAction), "s", [.command, .shift])
         add(file.submenu!, "导出 PNG…", #selector(exportAction), "e")
         add(file.submenu!, "交给 Agent…", #selector(handoffAction), "e", [.command, .shift])
+        add(file.submenu!, "导出 Agent 文件夹…", #selector(exportAgentFolder), "")
         let edit = NSMenuItem(); edit.title = "编辑"; edit.submenu = NSMenu(title: "编辑"); bar.addItem(edit)
         // Responder-chain actions preserve native text editing in the inspector.
         edit.submenu!.addItem(withTitle: "撤销", action: #selector(undo(_:)), keyEquivalent: "z")
@@ -168,6 +170,8 @@ final class EditorDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     @objc func saveAsAction() { model.save(asNew: true) }
     @objc func exportAction() { model.exportPNG() }
     @objc func handoffAction() { model.exportForAgent() }
+    @objc func exportAgentFolder() { model.exportAgentFolder() }
+    @objc func showAgentConnection() { showEditor(); model.showAgentConnection() }
     @objc func countdownCapture() { capture.captureAfterCountdown() }
     @objc func cancelCaptureCountdown() { capture.cancelCountdown() }
     @objc func chooseProbe() { showEditor(); capture.chooseProbe() }
@@ -185,7 +189,8 @@ final class EditorDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         if menuItem.action == #selector(recoverCaptures) || menuItem.action == #selector(enableShortcut) { return !capture.isBusy }
         if menuItem.action == #selector(undo(_:)) { return !model.undoHistory.isEmpty }
         if menuItem.action == #selector(redo(_:)) { return !model.redoHistory.isEmpty }
-        if menuItem.action == #selector(handoffAction) { return model.project != nil && !model.isExportingHandoff && !capture.isShowingPermissionGuide }
+        if menuItem.action == #selector(showAgentConnection) { return !model.handoffPresented && !capture.isShowingPermissionGuide && !model.isExportingHandoff }
+        if menuItem.action == #selector(handoffAction) || menuItem.action == #selector(exportAgentFolder) { return model.project != nil && !model.isExportingHandoff && !capture.isShowingPermissionGuide && !model.agentConnectionPresented }
         if [#selector(saveAction), #selector(saveAsAction), #selector(exportAction)].contains(menuItem.action) { return model.project != nil }
         return true
     }
@@ -333,6 +338,7 @@ struct EditorRootView: View {
                 }
             }
             .sheet(isPresented: $model.handoffPresented) { AgentHandoffView(model: model) }
+            .sheet(isPresented: $model.agentConnectionPresented) { AgentConnectionView(model: model) }
             .sheet(isPresented: $capture.isShowingPermissionGuide) { PermissionOnboardingView(capture: capture) }
     }
 

@@ -258,7 +258,7 @@ final class CaptureController: ObservableObject {
         // The fixed development Probe can predate machine-readable doctor reports.
         // Installed products always contain the matching helper and check on launch.
         guard usesEmbeddedCapture else { return }
-        isShowingPermissionGuide = permissionGuideState.isPresented && !model.handoffPresented
+        isShowingPermissionGuide = permissionGuideState.isPresented && !model.handoffPresented && !model.agentConnectionPresented
         performPermissionCheck(activateEditor: false)
     }
 
@@ -268,14 +268,14 @@ final class CaptureController: ObservableObject {
         permissionRefreshTask = Task {
             do { try await Task.sleep(for: .milliseconds(350)) } catch { return }
             guard !Task.isCancelled, !self.isBusy, self.countdown == nil,
-                  !self.model.handoffPresented, !self.model.isExportingHandoff,
+                  !self.model.handoffPresented, !self.model.agentConnectionPresented, !self.model.isExportingHandoff,
                   Date().timeIntervalSince(self.lastPermissionCheck) >= 1 else { return }
             self.performPermissionCheck(activateEditor: false)
         }
     }
 
     func showPermissionGuide() {
-        guard !isCapturing, !model.handoffPresented, !model.isExportingHandoff else { return }
+        guard !isCapturing, !model.handoffPresented, !model.agentConnectionPresented, !model.isExportingHandoff else { return }
         cancelActiveCountdown()
         permissionGuideState.show()
         isShowingPermissionGuide = true
@@ -325,7 +325,7 @@ final class CaptureController: ObservableObject {
                 let status = try await service.checkPermissions(probeURL: selectedProbe, outputRoot: outputRoot)
                 guard selectedProbe == probeURL else { isCheckingPermissions = false; return }
                 permissionStatus = status
-                let mayPresent = !model.handoffPresented && !model.isExportingHandoff
+                let mayPresent = !model.handoffPresented && !model.agentConnectionPresented && !model.isExportingHandoff
                 permissionGuideState.receive(status, presentIfMissing: usesEmbeddedCapture && mayPresent)
                 if mayPresent { isShowingPermissionGuide = permissionGuideState.isPresented }
                 lastPermissionReport = status.localizedDescription
@@ -335,7 +335,7 @@ final class CaptureController: ObservableObject {
             } catch {
                 permissionStatus = nil; lastPermissionReport = nil
                 permissionCheckError = error.localizedDescription
-                let mayPresent = !model.handoffPresented && !model.isExportingHandoff
+                let mayPresent = !model.handoffPresented && !model.agentConnectionPresented && !model.isExportingHandoff
                 permissionGuideState.invalidate(presentIfMissing: usesEmbeddedCapture && mayPresent)
                 if mayPresent { isShowingPermissionGuide = permissionGuideState.isPresented }
                 message = "未能读取权限状态，请重试检查或重新打开权限引导。"

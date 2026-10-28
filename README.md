@@ -2,7 +2,7 @@
 
 把应用截图、控件说明和界面上下文一起交给 Agent。
 
-OneShot 是面向 macOS 的本地采集与标注工具。按快捷键固定当前应用窗口，在截图上点选控件并写下意见，再导出一份包含截图、标注、冻结 AX 节点和完整上下文的材料。Agent 可以直接读取本地文件，也可以通过只读 MCP 按需读取。
+OneShot 是面向 macOS 的本地采集与标注工具。按快捷键固定当前应用窗口，在截图上点选控件并写下意见，再将截图、标注、冻结 AX 节点和完整上下文交给 Agent。一次配置本地 MCP 后，每次交付只需粘贴材料编号；也可导出本地文件。
 
 首发支持 **macOS 14+、Apple Silicon（arm64）**。当前为 **Pre-release**，已有 build 4 安装包使用 ad-hoc 签名，**没有 Developer ID 签名、未经 Apple 公证**。源码已支持[固定证书与 GitHub Actions 构建](docs/releasing.md)，需要配置签名身份并完成实机升级验收。当前采用手动下载替换更新，自动更新后续加入。
 
@@ -22,43 +22,38 @@ OneShot 是面向 macOS 的本地采集与标注工具。按快捷键固定当�
 2. 等待采集完成，编辑器会打开截图。截图、AX 和 OCR 的读取状态分别保留；失败不会被解释为完整采集。
 3. 点击“写反馈”，在固定右栏描述想修改的地方。点击“引用控件”后在截图中点选，或输入 `@` 搜索控件；同一段描述可以引用多个对象，例如“[保存按钮] 能改成 [发布按钮] 的样式吗？”。引用使用 `R1`、`R2` 编号，与截图双向定位。
 4. 编号、箭头、方框、文字和原有控件标注继续使用；在“标注”页签编辑样式与说明，控件树可选择重叠或截图外的对象。反馈引用与控件标注均绑定到本次冻结快照，不操作原应用。
-5. 点击 **“交给 Agent”**，选择新的导出文件夹。读取说明会复制到剪贴板，可粘贴给能读取本机文件的 Agent。
+5. 首次在 **OneShot → Agent 连接与材料** 中复制 MCP 配置并添加到 Agent。点击 **“交给 Agent”** 自动创建固定版本，材料引用复制到剪贴板，直接粘贴给 Agent。无需选择目录或逐次更改配置。
 6. 保存 `.oneshot` 项目后可以继续编辑。最近采集保留最近 30 份快照或项目，重开应用后可找回。
 
-没有反馈或标注时也能交付整次采集。当前未保存的描述、引用和标注会进入导出快照；导出不代替保存项目。后续修改后需要重新导出。
+没有反馈或标注时也能交付整次采集。当前未保存的描述、引用和标注会进入导出快照；导出不代替保存项目。后续修改后再次交付会生成新版本，旧引用仍指向旧内容。
 
 ## 交付内容与只读 MCP
 
+默认交付存放在应用管理的本地材料库中。引用形如 `OS-0123456789AB@1`，绑定明确版本。只有用户点击“交给 Agent”的内容进入材料库；未交付的采集和草稿不会自动暴露。
+
+在 **OneShot → Agent 连接与材料** 中可复制 Codex TOML 或通用 JSON 配置、检查本地服务、查看交付历史及撤销后续读取。Codex 配置示例（合并到现有 `config.toml`，保存后重启 MCP 连接）：
+
+```toml
+[mcp_servers.oneshot]
+command = "/Applications/OneShot.app/Contents/Helpers/oneshot-mcp"
+args = ["--library"]
+```
+
+Agent 从 `read_handoff(reference)` 开始，一次获得用户反馈、有序控件引用、相关 AX 控件摘要、标注图片、采集状态和继续读取入口。`read_details` 展开完整节点、反馈、AX/OCR 与诊断；`read_image` 可读取原图或按原图像素指定局部。新增材料无需重连，关闭编辑器后已有材料仍可读取。服务只读，不采集、点击、写入或访问网络。
+
+材料保留完整原始上下文，分享前请检查内容。撤销保留本地文件并阻止后续 MCP 读取，无法收回 Agent 已读取的内容。材料引用是定位信息，不是针对不同客户端的独立权限令牌；使用同一本地材料库的 Agent 可按引用读取尚未撤销的材料。
+
+没有 MCP 的 Agent 仍可通过 **文件 → 导出 Agent 文件夹** 获取兼容材料：
+
 ```text
 example-agent/
-  AGENT.md                 用户标注重点、采集身份和完整材料入口
-  handoff.json             结构化标注和完整目标 AX 节点
+  AGENT.md                 用户反馈、标注重点与材料入口
+  handoff.json             结构化反馈、标注和冻结 AX 节点
   annotated.png            原始像素尺寸的标注图
   source.oneshot/          可继续编辑的项目与完整原始采集
 ```
 
-完整上下文不因标注范围而裁剪，包含截图、AX、OCR、组件错误与截断诊断。分享材料前请检查整次采集的内容。OneShot 本身不上传材料；粘贴给其他 Agent 或分享文件夹是单独的用户操作。
-
-安装后，MCP 可执行文件位于：
-
-```text
-/Applications/OneShot.app/Contents/Helpers/oneshot-mcp
-```
-
-以支持 stdio 的 Agent 为例：
-
-```json
-{
-  "mcpServers": {
-    "oneshot-material": {
-      "command": "/Applications/OneShot.app/Contents/Helpers/oneshot-mcp",
-      "args": ["--handoff", "/absolute/path/to/example-agent"]
-    }
-  }
-}
-```
-
-每个 MCP 进程只读取启动参数明确选定的一份材料，提供摘要、标注索引、单条标注、完整上下文分页和图片。它没有采集、点击、写入或网络接口。安装 App 不会自动修改 Agent 配置。详见[交付与 MCP](docs/agent-handoff.md)。
+旧 `oneshot-mcp --handoff /absolute/path/to/example-agent` 模式继续保留。OneShot 不自动修改 Agent 配置，不会自行上传材料；Agent 读取之后如何使用内容由该客户端决定。详见[交付与 MCP](docs/agent-handoff.md)。
 
 ## 能力边界
 

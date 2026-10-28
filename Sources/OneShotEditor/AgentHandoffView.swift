@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import OneShotCore
 
 struct AgentHandoffView: View {
     @ObservedObject var model: EditorModel
@@ -8,9 +9,36 @@ struct AgentHandoffView: View {
         VStack(alignment: .leading, spacing: 18) {
             Label("Agent 材料已准备好", systemImage: "checkmark.circle.fill")
                 .font(.title2.bold()).foregroundStyle(.green)
-            Text("把下面的说明粘贴给可读取本地文件的 Agent。材料包含反馈描述、控件引用和标注重点，并保留截图与完整冻结上下文。")
-                .foregroundStyle(.secondary)
-            if let handoff = model.handoff {
+            if let entry = model.publishedHandoff {
+                Text(entry.reference).font(.title3.monospaced().bold()).textSelection(.enabled)
+                Text("把引用粘贴给已连接 OneShot MCP 的 Agent，即可读取本次反馈、标注图和完整冻结上下文。")
+                    .foregroundStyle(.secondary)
+                if let image = NSImage(contentsOf: model.handoffLibrary.snapshotDirectory(for: entry).appendingPathComponent("annotated.png")) {
+                    Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: .infinity, maxHeight: 180)
+                        .accessibilityLabel("本次交付的标注图预览")
+                }
+                ScrollView {
+                    Text(entry.prompt).font(.system(.body, design: .monospaced)).textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(12)
+                }.frame(height: 110).background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                Text("这是固定版本，包含当前未保存的反馈。后续编辑请再次交付；旧引用继续指向旧版本。")
+                    .font(.caption).foregroundStyle(.secondary)
+                if entry.revokedAt != nil { Text("此版本已撤销").foregroundStyle(.orange) }
+                HStack {
+                    Button("连接说明") {
+                        model.handoffPresented = false
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { model.showAgentConnection() }
+                    }
+                    Button("在 Finder 中显示") {
+                        NSWorkspace.shared.activateFileViewerSelecting([model.handoffLibrary.snapshotDirectory(for: entry)])
+                    }
+                    Spacer()
+                    Button("复制引用") { model.copyPublishedPrompt(entry) }.disabled(entry.revokedAt != nil)
+                    Button("完成") { model.handoffPresented = false }.buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.defaultAction)
+                }
+            } else if let handoff = model.handoff {
+                Text("将说明粘贴给可读取本地文件的 Agent。").foregroundStyle(.secondary)
                 ScrollView {
                     Text(handoff.prompt).font(.system(.body, design: .monospaced))
                         .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding(12)
@@ -26,6 +54,78 @@ struct AgentHandoffView: View {
                         .keyboardShortcut(.defaultAction)
                 }
             }
-        }.padding(24).frame(width: 620)
+        }.padding(24).frame(width: 660)
+    }
+}
+
+struct AgentConnectionView: View {
+    @ObservedObject var model: EditorModel
+    @State private var format = "codex"
+    @State private var copied = false
+
+    private var configuration: String {
+        format == "codex"
+            ? MCPConnectionConfiguration.toml(executable: model.mcpExecutable, library: model.mcpLibraryOverride)
+            : MCPConnectionConfiguration.json(executable: model.mcpExecutable, library: model.mcpLibraryOverride)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Agent 连接与材料").font(.title2.bold())
+            TabView {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("一次连接，按编号读取每次交付").font(.headline)
+                    Text("在 Agent 的 MCP 设置中添加本地 stdio 服务。连接后，将材料引用粘贴给 Agent；新增交付不需要重启连接。")
+                    Picker("配置格式", selection: $format) {
+                        Text("Codex · TOML").tag("codex")
+                        Text("通用 · JSON").tag("json")
+                    }.pickerStyle(.segmented).onChange(of: format) { _, _ in copied = false }
+                    ScrollView {
+                        Text(configuration).font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding(12)
+                    }.frame(height: 140).background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                    Text(format == "codex" ? "Codex：设置 → MCP servers 添加，或合并到 ~/.codex/config.toml；保存后重启该 MCP 连接。已有 oneshot 配置时更新该条目。"
+                         : "将 oneshot 条目合并到客户端现有 mcpServers 配置，不要覆盖其他连接。")
+                        .font(.caption).foregroundStyle(.secondary)
+                    HStack {
+                        Button(copied ? "已复制配置" : "复制配置") {
+                            NSPasteboard.general.clearContents()
+                            copied = NSPasteboard.general.setString(configuration, forType: .string)
+                        }
+                        Button("检查本地服务", action: model.checkAgentConnection).disabled(model.isCheckingAgentConnection)
+                        if model.isCheckingAgentConnection { ProgressView().controlSize(.small) }
+                    }
+                    Text(model.agentConnectionMessage).font(.caption).textSelection(.enabled)
+                    Text("只提供明确交付的固定版本。连接的本地 Agent 可按引用读取这些材料；未交付的采集和草稿不进入材料库。安装不会自动修改 Agent 配置。")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                }.padding(16).tabItem { Text("连接 Agent") }
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("撤销会阻止后续 MCP 读取，保留本地文件；无法收回 Agent 已读取的内容。")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if model.publishedHistory.isEmpty {
+                        ContentUnavailableView("尚无交付材料", systemImage: "tray", description: Text("在编辑器中点击“交给 Agent”即可创建。"))
+                    } else {
+                        List(model.publishedHistory) { entry in
+                            HStack {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(entry.reference).font(.system(.body, design: .monospaced)).textSelection(.enabled)
+                                    Text(entry.title).lineLimit(1)
+                                    Text(entry.createdAt, style: .date).font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if entry.revokedAt != nil { Text("已撤销").foregroundStyle(.secondary) }
+                                else {
+                                    Button("复制引用") { model.copyPublishedPrompt(entry) }
+                                    Button("撤销") { model.revokePublished(entry) }
+                                }
+                            }.padding(.vertical, 4)
+                        }
+                    }
+                    Button("刷新", action: model.refreshPublishedHistory)
+                }.padding(16).tabItem { Text("交付历史") }
+            }
+            HStack { Spacer(); Button("完成") { model.agentConnectionPresented = false }.keyboardShortcut(.defaultAction) }
+        }.padding(24).frame(width: 720, height: 580)
     }
 }

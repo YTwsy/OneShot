@@ -7,12 +7,17 @@ enum OneShotMCP {
     static func main() {
         signal(SIGPIPE, SIG_IGN)
         let arguments = Array(CommandLine.arguments.dropFirst())
-        guard arguments.count == 2, arguments[0] == "--handoff", arguments[1].hasPrefix("/") else {
-            fail("Usage: oneshot-mcp --handoff /absolute/path/to/one-export")
-        }
         do {
-            let reader = try ReadonlyHandoffReader(directory: URL(fileURLWithPath: arguments[1], isDirectory: true))
-            let server = OneShotMCPServer(reader: reader)
+            let server: OneShotMCPServer
+            if arguments == ["--library"] || arguments.isEmpty {
+                server = OneShotMCPServer(library: HandoffLibrary())
+            } else if arguments.count == 2, arguments[0] == "--library", arguments[1].hasPrefix("/") {
+                server = OneShotMCPServer(library: HandoffLibrary(directory: URL(fileURLWithPath: arguments[1], isDirectory: true)))
+            } else if arguments.count == 2, arguments[0] == "--handoff", arguments[1].hasPrefix("/") {
+                server = OneShotMCPServer(reader: try ReadonlyHandoffReader(directory: URL(fileURLWithPath: arguments[1], isDirectory: true)))
+            } else {
+                fail("Usage: oneshot-mcp --library [absolute-library-path] | --handoff /absolute/path/to/one-export")
+            }
             var buffer = Data()
             var input = [UInt8](repeating: 0, count: 65_536)
             while true {

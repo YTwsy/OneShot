@@ -31,12 +31,22 @@ final class EditorModel: ObservableObject {
     @Published private(set) var isExportingHandoff = false
     @Published private(set) var handoff: AgentHandoffExport?
     @Published var handoffPresented = false
+    @Published private(set) var publishedHandoff: PublishedHandoff?
+    @Published private(set) var publishedHistory: [PublishedHandoff] = []
+    @Published var agentConnectionPresented = false
+    @Published var agentConnectionMessage = "首次在 Agent 中添加连接，以后交付不需要更改配置。"
+    @Published private(set) var isCheckingAgentConnection = false
+    let handoffLibrary: HandoffLibrary
     private let recentStore: RecentCapturesStore
     private var savedDocument: AnnotationDocument?
     private var editGroup: String?
     weak var window: NSWindow?
 
     init(arguments: [String] = CommandLine.arguments) {
+        if let flag = arguments.firstIndex(of: "--handoff-library"), arguments.indices.contains(flag + 1),
+           arguments[flag + 1].hasPrefix("/") {
+            handoffLibrary = HandoffLibrary(directory: URL(fileURLWithPath: arguments[flag + 1], isDirectory: true))
+        } else { handoffLibrary = HandoffLibrary() }
         if let flag = arguments.firstIndex(of: "--recent-index"), arguments.indices.contains(flag + 1),
            arguments[flag + 1].hasPrefix("/") {
             recentStore = RecentCapturesStore(fileURL: URL(fileURLWithPath: arguments[flag + 1]))
@@ -349,6 +359,27 @@ final class EditorModel: ObservableObject {
     func exportForAgent() {
         guard project != nil, !isExportingHandoff else { return }
         feedbackEditor.commitEditing()
+        window?.makeFirstResponder(nil)
+        guard let current = project else { return }
+        let library = handoffLibrary, title = title
+        isExportingHandoff = true
+        status = "正在准备固定版本的 Agent 材料…"
+        Task {
+            do {
+                let entry = try await Task.detached(priority: .userInitiated) {
+                    try library.publish(project: current, title: title)
+                }.value
+                publishedHandoff = entry; handoff = nil
+                isExportingHandoff = false
+                copyPublishedPrompt(entry)
+                handoffPresented = true
+            } catch { isExportingHandoff = false; show(error) }
+        }
+    }
+
+    func exportAgentFolder() {
+        guard project != nil, !isExportingHandoff else { return }
+        feedbackEditor.commitEditing()
         // Commit an in-progress native text edit before taking the immutable export snapshot.
         window?.makeFirstResponder(nil)
         guard let current = project else { return }
@@ -367,6 +398,7 @@ final class EditorModel: ObservableObject {
                 }.value
                 isExportingHandoff = false
                 handoff = exported
+                publishedHandoff = nil
                 copyHandoffPrompt()
                 handoffPresented = true
             } catch {
@@ -389,6 +421,60 @@ final class EditorModel: ObservableObject {
     func refreshRecents() {
         do { recentCaptures = try recentStore.load(); recentError = nil }
         catch { recentError = error.localizedDescription }
+    }
+
+    var mcpExecutable: URL {
+        AppDistribution.mcpExecutableURL(applicationURL: Bundle.main.bundleURL)
+    }
+
+    var mcpLibraryOverride: URL? {
+        handoffLibrary.directory == HandoffLibrary.defaultDirectory ? nil : handoffLibrary.directory
+    }
+
+    func showAgentConnection() {
+        refreshPublishedHistory()
+        agentConnectionPresented = true
+    }
+
+    func refreshPublishedHistory() {
+        do { publishedHistory = try handoffLibrary.list() }
+        catch { agentConnectionMessage = error.localizedDescription }
+    }
+
+    func copyPublishedPrompt(_ entry: PublishedHandoff) {
+        do {
+            _ = try handoffLibrary.resolve(reference: entry.reference)
+            NSPasteboard.general.clearContents()
+            guard NSPasteboard.general.setString(entry.prompt, forType: .string) else {
+                throw HandoffReadError.invalidPackage("复制失败，请选择文字手动复制。")
+            }
+            status = "材料 \(entry.reference) 已准备好，引用已复制。"
+        } catch { show(error) }
+    }
+
+    func revokePublished(_ entry: PublishedHandoff) {
+        do {
+            try handoffLibrary.revoke(reference: entry.reference)
+            refreshPublishedHistory()
+            if publishedHandoff?.reference == entry.reference {
+                publishedHandoff = publishedHistory.first { $0.reference == entry.reference }
+            }
+            status = "已撤销 \(entry.reference) 的后续 MCP 读取。"
+        } catch { show(error) }
+    }
+
+    func checkAgentConnection() {
+        guard !isCheckingAgentConnection else { return }
+        isCheckingAgentConnection = true
+        agentConnectionMessage = "正在检查本地 MCP 服务…"
+        let executable = mcpExecutable, directory = handoffLibrary.directory
+        Task {
+            do {
+                try await Task.detached { try MCPConnectionConfiguration.check(executable: executable, library: directory) }.value
+                agentConnectionMessage = "本地服务检查通过。请在 Agent 中添加配置并连接；此检查不代表 Agent 已连接。"
+            } catch { agentConnectionMessage = error.localizedDescription }
+            isCheckingAgentConnection = false
+        }
     }
 
     @discardableResult func remember(_ directory: URL) -> Bool {
