@@ -10,9 +10,9 @@ OneShot is a native macOS window capture and annotation tool. Capture a window w
 
 ## Make feedback specific
 
-![Capture a window, reference two buttons, describe the change, and add an arrow](docs/media/annotate-workflow.gif)
+![Capture a window with the shortcut, reference controls in feedback, then select the Save button and add a control annotation](docs/media/annotate-workflow.en.gif)
 
-*Illustrated workflow with fictional data and Chinese UI labels, not a screen recording. [Static image](docs/media/annotate-workflow.png).*
+*Focus a window → press ⌃⌥⌘S to capture → reference controls and write feedback → select a control and describe the change. Illustrated with fictional data and translated UI labels, not a screen recording. [Static image](docs/media/annotate-workflow.en.png).*
 
 - **Capture context with the image.** Keep the screenshot, Accessibility (AX) controls, OCR text, and the individual capture results.
 - **Point to actual controls.** Select a control in the image or search with `@`. References such as `R1` and `R2` link feedback to the frozen controls. A sentence can reference multiple controls.
@@ -31,9 +31,9 @@ A capture can be handed off without annotations. A handoff includes unsaved edit
 
 ## What the agent receives
 
-![Connect a client, publish a local snapshot, copy its reference, and paste it into an agent conversation for MCP reading](docs/media/agent-handoff-workflow.gif)
+![Connect a client, publish a local snapshot, copy its reference, and paste it into an agent conversation for MCP reading](docs/media/agent-handoff-workflow.en.gif)
 
-*Illustrated workflow; the conversation is a generic example, not an actual client interface. [Static image](docs/media/agent-handoff-workflow.png).*
+*Illustrated workflow with translated UI labels; the conversation is a generic example, not an actual client interface. [Static image](docs/media/agent-handoff-workflow.en.png).*
 
 A reference such as `OS-0123456789AB@1` lets a connected agent read:
 

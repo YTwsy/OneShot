@@ -49,7 +49,9 @@ python3 -m venv .build/readme-media-venv
 .build/readme-media-venv/bin/python scripts/render-readme-media.py
 ```
 
-默认使用 macOS 的 PingFang 字体；其他环境可传 `--font /path/to/cjk-font.ttf`。字体不打包入仓库。输出为 `docs/media/` 中两张循环 GIF 和两张静态 PNG。首次连接、复制引用、粘贴和只读读取均按现有实现表达，不能用这些示意图作为实机验收证据。
+默认使用 macOS 的 PingFang 字体；其他环境可传 `--font /path/to/cjk-font.ttf`。字体不打包入仓库。默认输出 `docs/media/` 中两组流程的中英文版本，共四张循环 GIF 和四张静态 PNG；英文文件以 `.en.gif` / `.en.png` 结尾，供英文 README 使用。可用 `--language zh` 或 `--language en` 单独生成一个语言版本。英文示意图中的界面标签为说明性翻译，不表示应用已提供英文界面。首次连接、复制引用、粘贴和只读读取均按现有实现表达，不能用这些示意图作为实机验收证据。
+
+首组动图从目标应用的前台窗口开始，展示快捷键采集、同一窗口进入冻结画布、引用控件、写反馈，再通过“控件”工具点选按钮并填写修改意见。单独重制这组动图和对应静态图时，在渲染命令后加 `--only annotate`；`--only handoff` 仅重制交付流程。两个选项可以组合，例如 `--only handoff --language en` 仅生成英文交付流程。
 
 ## 历史调查与验证
 
