@@ -1,6 +1,8 @@
 # 构建与发布
 
-OneShot 支持 macOS 14+ 与 Apple Silicon（arm64），使用 MIT License，目前为 Pre-release，采用手动下载替换更新。已有 build 4 安装包使用 ad-hoc 签名且未经 Apple 公证。下述证书构建流程需要先配置签名身份；加入工作流本身不会改变已安装版本或现有授权。
+OneShot 支持 macOS 14+ 与 Apple Silicon（arm64），使用 MIT License，目前为 Pre-release，采用手动下载替换更新。历史 build 4 为 ad-hoc 签名；截至 2026-10-28，本地 build 10 的构建清单记录 Apple Development 签名，来源为 `6fec1ce5ea42`，仍未经 Apple 公证。这不代表已经发布 GitHub Release，也不代表 Developer ID 分发验收完成。实际下载包以对应版本的发布说明及构建清单为准。
+
+首次公开前参见[公开发布检查表](public-release-checklist.md)。下述证书构建流程需要先配置签名身份；加入工作流本身不会改变已安装版本或现有授权。
 
 ## 组件与代码身份
 

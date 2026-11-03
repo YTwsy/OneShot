@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+暂无未发布变更。
+
+## 0.1.0-alpha.1 build 11 — 2026-11-03
+
+首个 GitHub Actions 构建的私有预发布版本，复用 Apple Development 身份，未经 Apple 公证。
+
+- 整理中英文 README、安装与开发说明，新增标注和 Agent 交付流程动态图。
+
 - Agent 连接页面支持一键注册 Codex / Claude Code 用户级 MCP，提供状态检测、路径更新、移除与 CLI 选择；临时配置校验、原文件备份及并发修改检测保护其他设置。
 
 - “交给 Agent”自动创建本地固定版本并复制材料引用；同一项目重复交付递增版本，旧版本保持不变。

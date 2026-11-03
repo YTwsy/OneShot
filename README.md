@@ -1,72 +1,74 @@
 # OneShot
 
-把应用截图、控件说明和界面上下文一起交给 Agent。
+**把画面和你的意见，一起交给 Agent。**
 
-OneShot 是面向 macOS 的本地采集与标注工具。按快捷键固定当前应用窗口，在截图上点选控件并写下意见，再将截图、标注、冻结 AX 节点和完整上下文交给 Agent。一次配置本地 MCP 后，每次交付只需粘贴材料编号；也可导出本地文件。
+OneShot 是 macOS 上的窗口采集与标注工具。按下快捷键，固定当前窗口；点选控件、写下修改意见，再把截图、反馈和界面上下文一起交给 Agent。适合 UI 调整、问题复现和设计反馈。
 
-首发支持 **macOS 14+、Apple Silicon（arm64）**。当前为 **Pre-release**，已有 build 4 安装包使用 ad-hoc 签名，**没有 Developer ID 签名、未经 Apple 公证**。源码已支持[固定证书与 GitHub Actions 构建](docs/releasing.md)，需要配置签名身份并完成实机升级验收。当前采用手动下载替换更新，自动更新后续加入。
+[English](README.en.md) · [安装与使用](docs/getting-started.md) · [连接 Agent](docs/agent-handoff.md) · [开发与构建](docs/development.md) · [更新记录](CHANGELOG.md)
 
-## 安装与权限
+**macOS 14+ · Apple Silicon · 原生 SwiftUI · 本地采集 · MIT · 预发布阶段**
 
-下载发布的 DMG，将 `OneShot.app` 拖到 Applications，再从 Applications 打开。一个 App 内包含采集组件与 MCP，不需要另行安装 Probe 或 Swift 工具链。
+## 从“这里改一下”到明确的反馈
 
-此测试版未经公证，macOS 可能阻止首次打开。请先确认下载来源和 SHA-256，再按系统提示决定是否允许；不要为了运行应用关闭整机安全检查。参见 [Apple 的应用打开说明](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac)。
+![OneShot 标注流程：采集窗口，引用保存和发布按钮，写下反馈并添加箭头](docs/media/annotate-workflow.gif)
 
-发布版首次启动展示[权限引导](docs/permissions.md)，分别说明并请求屏幕录制和辅助功能。检查状态不会自动申请权限；点击每项的“开启”按钮才发起对应请求，最终批准仍由用户完成。新版应用和内置采集组件的显示名称统一为 OneShot；系统可能保留旧版 OneShot Capture 条目，请按引导中的当前组件路径核对。返回应用后会重新检查；也可稍后设置，先编辑已有项目。从旧 ad-hoc 安装包迁移到证书签名版本时，可能需要首次重新授权。
+*流程示意，使用虚构界面与数据，并非实机录屏。[查看静态图](docs/media/annotate-workflow.png)。*
 
-发布包不包含个人采集、日志、标注项目或参考样本。正式发布流程见[构建与发布](docs/releasing.md)。
+- **画面带着上下文。** 同时保留窗口截图、辅助功能（AX）控件信息、OCR 文字，以及各自的采集状态。
+- **反馈可以指向具体控件。** 在截图中点选，或输入 `@` 搜索；`R1`、`R2` 引用与画面双向定位，一句话可以引用多个对象。
+- **保留熟悉的图形标注。** 编号、箭头、方框和文字用于补充说明；`.oneshot` 项目可以保存后继续编辑。
+- **一次连接，反复交付。** 内置只读 MCP，支持连接 Codex / Claude Code，也可以导出文件夹供其他 Agent 使用。
 
 ## 一轮使用
 
-1. 保持 OneShot 运行，切到目标应用，按 **Control + Option + Command + S（⌃⌥⌘S）**。也可使用“3 秒后采集”留出切换窗口的时间。
-2. 等待采集完成，编辑器会打开截图。截图、AX 和 OCR 的读取状态分别保留；失败不会被解释为完整采集。
-3. 点击“写反馈”，在固定右栏描述想修改的地方。点击“引用控件”后在截图中点选，或输入 `@` 搜索控件；同一段描述可以引用多个对象，例如“[保存按钮] 能改成 [发布按钮] 的样式吗？”。引用使用 `R1`、`R2` 编号，与截图双向定位。
-4. 编号、箭头、方框、文字和原有控件标注继续使用；在“标注”页签编辑样式与说明，控件树可选择重叠或截图外的对象。反馈引用与控件标注均绑定到本次冻结快照，不操作原应用。
-5. 首次在 **OneShot → Agent 连接与材料** 中点击“连接到 Codex”或“连接到 Claude Code”。点击 **“交给 Agent”** 自动创建固定版本，材料引用复制到剪贴板，直接粘贴给 Agent。无需选择目录或逐次更改配置。
-6. 保存 `.oneshot` 项目后可以继续编辑。最近采集保留最近 30 份快照或项目，重开应用后可找回。
+1. **采集。** 保持 OneShot 运行，切到目标应用，按 **⌃⌥⌘S**（Control + Option + Command + S）。也可以点击“3 秒后采集”。
+2. **描述。** 点击“写反馈”，说明想改什么；点击“引用控件”或输入 `@`，将意见绑定到这次采集的控件。
+3. **标注。** 按需添加箭头、方框、编号或文字。编辑的是冻结快照，不会操作原应用。
+4. **连接。** 首次打开 **OneShot → Agent 连接与材料**，连接到已安装的 Codex 或 Claude Code，然后在客户端重新加载 MCP。
+5. **交付。** 点击 **“交给 Agent”**（⇧⌘E），生成固定版本并复制读取说明；**将引用粘贴到 Agent 对话中**。
 
-没有反馈或标注时也能交付整次采集。当前未保存的描述、引用和标注会进入导出快照；导出不代替保存项目。后续修改后再次交付会生成新版本，旧引用仍指向旧内容。
+没有反馈时也可以交付整次采集。交付包含尚未保存的编辑，但不代替保存项目；再次交付会生成新版本，旧引用保持不变。
 
-## 交付内容与只读 MCP
+## Agent 收到什么
 
-默认交付存放在应用管理的本地材料库中。引用形如 `OS-0123456789AB@1`，绑定明确版本。只有用户点击“交给 Agent”的内容进入材料库；未交付的采集和草稿不会自动暴露。
+![OneShot 交付流程：连接客户端，创建固定版本，复制引用，粘贴给 Agent 后通过只读 MCP 读取](docs/media/agent-handoff-workflow.gif)
 
-在 **OneShot → Agent 连接与材料** 中可一键连接 Codex / Claude Code、检测和更新配置、移除连接，也可复制手动配置、检查本地服务、查看交付历史及撤销后续读取。Codex 配置示例（合并到现有 `config.toml`，保存后重启 MCP 连接）：
+*流程示意，Agent 对话为通用示例，并非某个客户端的实际界面。[查看静态图](docs/media/agent-handoff-workflow.png)。*
 
-```toml
-[mcp_servers.oneshot]
-command = "/Applications/OneShot.app/Contents/Helpers/oneshot-mcp"
-args = ["--library"]
-```
+将类似 `OS-0123456789AB@1` 的材料引用交给 Agent 后，它可以通过本地 MCP 读取：
 
-Agent 从 `read_handoff(reference)` 开始，一次获得用户反馈、有序控件引用、相关 AX 控件摘要、标注图片、采集状态和继续读取入口。`read_details` 展开完整节点、反馈、AX/OCR 与诊断；`read_image` 可读取原图或按原图像素指定局部。新增材料无需重连，关闭编辑器后已有材料仍可读取。服务只读，不采集、点击、写入或访问网络。
+| 内容 | 用途 |
+| --- | --- |
+| 反馈原文与有序控件引用 | 理解你要改什么，以及在说哪个控件 |
+| 标注图与原始截图 | 对照视觉位置，按需读取局部图像 |
+| 冻结 AX 节点及已采集的上下文 | 查看控件角色、文字、状态与层级 |
+| 截图、AX、OCR 的独立状态与诊断 | 区分成功、缺失、失败和截断 |
 
-材料保留完整原始上下文，分享前请检查内容。撤销保留本地文件并阻止后续 MCP 读取，无法收回 Agent 已读取的内容。材料引用是定位信息，不是针对不同客户端的独立权限令牌；使用同一本地材料库的 Agent 可按引用读取尚未撤销的材料。
+入口是 `read_handoff`，细节通过 `read_details` / `read_image` 继续读取。也可用 **文件 → 导出 Agent 文件夹**，得到 `AGENT.md`、`handoff.json`、`annotated.png` 和可继续编辑的 `source.oneshot/`。配置与接口说明见[交付与 MCP](docs/agent-handoff.md)。
 
-没有 MCP 的 Agent 仍可通过 **文件 → 导出 Agent 文件夹** 获取兼容材料：
+## 安装与当前状态
 
-```text
-example-agent/
-  AGENT.md                 用户反馈、标注重点与材料入口
-  handoff.json             结构化反馈、标注和冻结 AX 节点
-  annotated.png            原始像素尺寸的标注图
-  source.oneshot/          可继续编辑的项目与完整原始采集
-```
+支持 **macOS 14+、Apple Silicon（arm64）**。目前处于预发布阶段，采用手动下载替换更新。
 
-旧 `oneshot-mcp --handoff /absolute/path/to/example-agent` 模式继续保留。OneShot 仅在点击连接、更新或移除时修改对应客户端的用户级配置，并保留原文件备份；不会自行上传材料；Agent 读取之后如何使用内容由该客户端决定。详见[交付与 MCP](docs/agent-handoff.md)。
+如果本仓库 Releases 已提供安装包，请阅读该版本说明、核对 SHA-256，再把 `OneShot.app` 拖到 Applications 打开。单个 App 内置采集组件与 MCP，使用安装包不需要 Swift 工具链。尚无公开安装包时，可以[从源码运行](docs/development.md)。
 
-## 能力边界
+**当前构建流程尚未完成 Apple 公证。** Apple Development 签名也不等同于 Developer ID 分发签名；具体包的状态以其发布说明与构建清单为准。macOS 可能阻止首次打开，请按 [Apple 的应用打开说明](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac)处理，不要关闭整机安全检查。
 
-- 当前采集目标为前台应用最靠前的可见普通窗口，不是整个屏幕或整个应用的所有窗口。窗口／选区自由选择、裁切和模糊遮挡尚未实现。
-- 截图、AX 和 OCR 是不同时间的独立读取。窗口身份稳定不代表内容原子一致。
-- 只保留应用实际暴露的信息；不承诺所有应用的完整文档。AX 失败、预算限制与序列化截断明确记录，OCR 不当作控件状态。
-- 采集不自动滚动、点击或切换目标应用的辅助功能模式。CLI 的 Electron AX 启用是单独的显式选项。
-- 关闭编辑窗口后菜单栏与快捷键继续运行，⌘Q 完全退出。采集忙碌时不重复启动；超时不终止组件或自动重试，完成结果可以恢复。
-- 证书签名版本的升级权限保持、真实快捷键连续性、HUD 焦点和各应用兼容性仍需持续实机验证。开发测试通过不等于所有机器的安装／授权验收通过。
+首次采集需要**屏幕录制**与**辅助功能**权限。应用分别说明并请求这两项权限，批准由你在系统中完成。详见[安装与使用](docs/getting-started.md)、[权限说明](docs/permissions.md)。
 
-## 从源码开发
+## 数据与能力边界
 
-需要 macOS 14+ 和 Swift 6 工具链。项目使用 SwiftPM，没有第三方 Swift 包依赖。
+- **本地保留，明确交付。** 只有点击“交给 Agent”的快照进入 MCP 材料库，未交付采集和草稿不会自动暴露。OneShot 不自行上传材料；Agent 读取后的数据处理由该客户端决定。
+- **分享前检查完整上下文。** 材料可能包含未标注区域、窗口标题、AX / OCR 文字。目前没有裁切和模糊遮挡工具；在源应用移除敏感信息后重新采集。
+- **引用绑定版本。** 引用是本机定位信息，不是客户端专属权限令牌。撤销会阻止后续 MCP 读取，无法收回已经返回给 Agent 的内容。
+- **采集范围有边界。** 当前目标为前台应用最靠前的可见普通窗口；不支持自由选区或一次采集整个应用的所有窗口。AX 内容取决于应用实际暴露的信息，不保证完整文档。
+- **截图、AX 和 OCR 独立读取。** 它们不是原子快照；OCR 不能替代控件状态。MCP 只读，不采集、点击、写入或访问网络。
+
+关闭编辑窗口后，菜单栏与快捷键继续运行；⌘Q 完全退出。应用兼容性、首次授权和升级权限保持仍需实机验证，自动测试不能代替这些验收。
+
+## 开发与参与
+
+使用 macOS 14+ 和 Swift 6 工具链，SwiftPM 构建，无第三方 Swift 包依赖。
 
 ```sh
 zsh scripts/test.sh
@@ -75,37 +77,12 @@ zsh scripts/build-editor.sh
 open '.build/OneShot Editor.app'
 ```
 
-开发版 Editor 和 Probe 使用独立开发身份，仍可分开构建。`build-editor.sh` 不替换已授权的开发 Probe；重建 Probe 后应重新检查系统授权。
+[开发与 CLI](docs/development.md) · [构建与发布](docs/releasing.md) · [贡献指南](CONTRIBUTING.md) · [安全反馈](SECURITY.md) · [公开发布检查表](docs/public-release-checklist.md)
 
-```sh
-zsh scripts/run-probe.sh doctor
-zsh scripts/run-probe.sh authorize
-zsh scripts/run-probe.sh capture --app com.apple.Music --output Captures/example --ocr
-```
-
-多个窗口时需先用 `windows --app …` 查询，再显式指定 `--window-id`。`authorize` 是主动请求系统权限的入口；`capture` 和 `doctor` 不自动显示授权提示。读取已有捕获不重新访问原应用。
-
-从干净提交构建可分发包：
-
-```sh
-zsh scripts/build-release.sh --version 0.1.0-alpha.1 --build-number 1 --ref HEAD
-```
-
-脚本生成单个 App、DMG、校验和、源码归档和版本／提交清单。产物保存到 Git 忽略的 `artifacts/`，不会覆盖已有产物，也不会上传或发布。发布步骤、验收边界和组件身份见[构建与发布](docs/releasing.md)。
-
-## 开发记录
-
-- [快捷键采集与计时](docs/shortcut-capture.md)
-- [原生标注编辑器](docs/annotation-editor.md)
-- [采集完整度基准](docs/capture-baseline.md)
-- [原生采集实测](docs/capture-validation-2026-10-25.md)
-- [前台场景对照](docs/foreground-comparison-2026-10-25.md)
-- [历史 AppShot 调查与实现边界](docs/codex-appshot-investigation.md)
-
-历史报告描述对应日期、版本与样本的观察，不是当前机器或未来版本的保证。原始参考图、实际捕获及本地验收证据留在本机，不纳入 Git。
+技术说明：[编辑器](docs/annotation-editor.md)、[快捷键采集](docs/shortcut-capture.md)、[采集完整度](docs/capture-baseline.md)。历史调查和验证报告的入口见[开发文档](docs/development.md#历史调查与验证)。
 
 ## 许可证与参考
 
-OneShot 使用 [MIT License](LICENSE)
+采用 [MIT License](LICENSE)。基于 macOS 的 CoreGraphics、ScreenCaptureKit、Accessibility 与 Vision 独立实现。
 
-实现独立使用 macOS 的 CoreGraphics、ScreenCaptureKit、Accessibility 与 Vision。交互和能力参考包括 [Pinpoint](https://github.com/croustibat/Pinpoint)、[开源 Appshots](https://github.com/Shahfarzane/appshots)、[Remarc](https://github.com/metedata/Remarc) 和 [Peekaboo](https://github.com/openclaw/Peekaboo)。这些链接不表示代码或资源被打包进 OneShot。OneShot 不包含或调用 Codex 的专有 AppShot 服务。
+交互和能力参考：[Pinpoint](https://github.com/croustibat/Pinpoint)、[开源 Appshots](https://github.com/Shahfarzane/appshots)、[Remarc](https://github.com/metedata/Remarc)、[Peekaboo](https://github.com/openclaw/Peekaboo)。这些链接不表示其代码或资源被打包进 OneShot。OneShot 不包含或调用 Codex 的专有 AppShot 服务。
