@@ -1,4 +1,4 @@
-name: Signed preview build
+name: Signed release build
 
 # This workflow packages a fixed, previously exported identity. It never creates
 # certificates, publishes a Release, or changes a user's macOS privacy grants.
@@ -8,14 +8,14 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Preview version (for example 0.1.0-alpha.1)
+        description: Release version (for example 0.1.0 or 0.1.0-rc.1)
         required: true
-        default: 0.1.0-alpha.1
+        default: 0.1.0
         type: string
       build_number:
         description: Numeric bundle build number
         required: true
-        default: '1'
+        default: '12'
         type: string
       signing_mode:
         description: Reusable certificate mode; self-signed uses a fixed root and pinned identity
@@ -209,7 +209,7 @@ jobs:
           ONESHOT_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.ONESHOT_SIGNING_CERTIFICATE_PASSWORD }}
           ONESHOT_SIGNING_IDENTITY: ${{ secrets.ONESHOT_SIGNING_IDENTITY }}
         run: zsh scripts/import-signing-identity.sh --directory "$ONESHOT_SIGNING_DIRECTORY" --github-env "$GITHUB_ENV"
-      - name: Build and verify the signed preview
+      - name: Build and verify the signed release
         run: |
           set -euo pipefail
           oneshot_arguments=(--version "$ONESHOT_RELEASE_VERSION" --build-number "$ONESHOT_BUILD_NUMBER"
@@ -276,5 +276,5 @@ jobs:
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as output:
               output.write('Signing mode: ' + os.environ['ONESHOT_SIGNING_MODE'] + '\n\n' + comparison + '\n\n')
               output.write('macOS privacy permission inheritance is not verified by this build. An actual upgrade and capture test on the user Mac is still required.\n\n')
-              output.write('The preview is not notarized. No GitHub Release, tag, or repository changes were published.\n')
+              output.write('The build is not notarized. No GitHub Release, tag, or repository changes were published.\n')
           PY

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise preview version rules and the metadata consumed by the app verifier."""
+"""Exercise release channels and the metadata consumed by the app verifier."""
 
 import importlib.util
 import copy
@@ -39,6 +39,8 @@ class ReleaseMetadataTests(unittest.TestCase):
                 capture = metadata.bundle_metadata(version, "17", COMMIT, True)
                 self.assertEqual(main["CFBundleShortVersionString"], version.split("-")[0])
                 self.assertEqual(main["OneShotReleaseTag"], "v" + version)
+                self.assertEqual(main["OneShotDistributionChannel"], "prerelease")
+                self.assertEqual(capture["OneShotDistributionChannel"], "prerelease")
                 self.assertEqual(main["CFBundleVersion"], "17")
                 self.assertEqual(main["OneShotSourceCommit"], COMMIT)
                 self.assertEqual(main["CFBundleIdentifier"], "io.github.ytwsy.oneshot")
@@ -50,6 +52,29 @@ class ReleaseMetadataTests(unittest.TestCase):
                 self.assertEqual(capture["OneShotSourceCommit"], main["OneShotSourceCommit"])
                 self.assertTrue(main["NSScreenCaptureUsageDescription"])
                 self.assertEqual(capture["NSScreenCaptureUsageDescription"], main["NSScreenCaptureUsageDescription"])
+
+    def test_stable_versions_keep_signing_and_permission_boundaries(self):
+        for version in ("0.1.0", "1.2.3", "65535.0.0"):
+            for mode in metadata.SIGNING_MODES:
+                with self.subTest(version=version, mode=mode), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    app = root / "OneShot.app"
+                    metadata.write_bundle_metadata(app, version, "12", COMMIT, mode)
+                    for relative in ("Contents/Info.plist", "Contents/Helpers/OneShot Capture.app/Contents/Info.plist"):
+                        plist = plistlib.loads((app / relative).read_bytes())
+                        self.assertEqual(plist["CFBundleShortVersionString"], version)
+                        self.assertEqual(plist["OneShotReleaseTag"], "v" + version)
+                        self.assertEqual(plist["CFBundleVersion"], "12")
+                        self.assertEqual(plist["OneShotDistributionChannel"], "release")
+                        self.assertEqual(plist["OneShotSigningStatus"], mode + "-unnotarized")
+                    metadata.write_manifest(root, version, "12", COMMIT, mode, signing_report(mode))
+                    manifest = json.loads((root / "release-manifest.json").read_text())
+                    self.assertFalse(manifest["prerelease"])
+                    self.assertFalse(manifest["notarized"])
+                    self.assertEqual(manifest["permissionContinuity"], "not-verified")
+                    self.assertEqual(manifest["signingMode"], mode)
+                    self.assertEqual(manifest["sourceCommit"], COMMIT)
+                    self.assertEqual(manifest["tag"], "v" + version)
 
     def test_all_signing_modes_have_truthful_bundle_and_manifest_metadata(self):
         for mode in metadata.SIGNING_MODES:
@@ -76,6 +101,7 @@ class ReleaseMetadataTests(unittest.TestCase):
                 self.assertEqual(manifest["adHocSigned"], mode == "ad-hoc")
                 self.assertEqual(manifest["developerIDSigned"], mode == "developer-id")
                 self.assertFalse(manifest["notarized"])
+                self.assertTrue(manifest["prerelease"])
                 self.assertEqual(manifest["permissionContinuity"], "not-verified")
                 self.assertEqual(manifest["signingReport"], report)
 
@@ -161,7 +187,8 @@ class ReleaseMetadataTests(unittest.TestCase):
             self.assertFalse((root / "release-manifest.json").exists())
 
     def test_ambiguous_or_shell_sensitive_version_and_invalid_provenance_rejected(self):
-        versions = ["0.1.0", "v0.1.0-alpha.1", "01.1.0-alpha.1", "0.01.0-alpha.1",
+        versions = ["v0.1.0", "0.1", "01.1.0", "0.01.0", "0.1.00", "0.1.0-", "65536.0.0",
+                    "0.1.0\n", "0.1.0;touch-x", "v0.1.0-alpha.1", "01.1.0-alpha.1", "0.01.0-alpha.1",
                     "0.1.0-alpha.01", "0.1.0-alpha", "0.1.0-preview.1", "0.1.0-alpha.1+local",
                     "0.1.0-alpha.1\n", "0.1.0-alpha.1;touch-x", "65536.0.0-alpha.1"]
         for version in versions:

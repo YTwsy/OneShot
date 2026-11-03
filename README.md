@@ -4,9 +4,9 @@
 
 OneShot 是 macOS 上的窗口采集与标注工具。按下快捷键，固定当前窗口；点选控件、写下修改意见，再把截图、反馈和界面上下文一起交给 Agent。适合 UI 调整、问题复现和设计反馈。
 
-[English](README.en.md) · [安装与使用](docs/getting-started.md) · [连接 Agent](docs/agent-handoff.md) · [开发与构建](docs/development.md) · [更新记录](CHANGELOG.md)
+[下载最新版](https://github.com/YTwsy/OneShot/releases/latest) · [English](README.en.md) · [安装与使用](docs/getting-started.md) · [连接 Agent](docs/agent-handoff.md) · [开发与构建](docs/development.md) · [更新记录](CHANGELOG.md)
 
-**macOS 14+ · Apple Silicon · 原生 SwiftUI · 本地采集 · MIT · 预发布阶段**
+**macOS 14+ · Apple Silicon · 原生 SwiftUI · 本地采集 · MIT · v0.1.0**
 
 ## 从“这里改一下”到明确的反馈
 
@@ -48,11 +48,11 @@ OneShot 是 macOS 上的窗口采集与标注工具。按下快捷键，固定�
 
 ## 安装与当前状态
 
-支持 **macOS 14+、Apple Silicon（arm64）**。目前处于预发布阶段，采用手动下载替换更新。
+支持 **macOS 14+、Apple Silicon（arm64）**。当前正式版本为 **0.1.0（build 12）**，采用手动下载替换更新。
 
-如果本仓库 Releases 已提供安装包，请阅读该版本说明、核对 SHA-256，再把 `OneShot.app` 拖到 Applications 打开。单个 App 内置采集组件与 MCP，使用安装包不需要 Swift 工具链。尚无公开安装包时，可以[从源码运行](docs/development.md)。
+从 [GitHub Releases](https://github.com/YTwsy/OneShot/releases/latest) 下载 DMG，阅读版本说明并核对 SHA-256，再把 `OneShot.app` 拖到 Applications 打开。单个 App 内置采集组件与 MCP，使用安装包不需要 Swift 工具链。也可以[从源码运行](docs/development.md)。
 
-**当前构建流程尚未完成 Apple 公证。** Apple Development 签名也不等同于 Developer ID 分发签名；具体包的状态以其发布说明与构建清单为准。macOS 可能阻止首次打开，请按 [Apple 的应用打开说明](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac)处理，不要关闭整机安全检查。
+**0.1.0 使用 Apple Development 签名，未经 Apple 公证。** 正式版本号不改变签名状态；Apple Development 也不等同于 Developer ID 分发签名。具体包的状态以其发布说明与构建清单为准。macOS 可能阻止首次打开，请按 [Apple 的应用打开说明](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac)处理，不要关闭整机安全检查。
 
 首次采集需要**屏幕录制**与**辅助功能**权限。应用分别说明并请求这两项权限，批准由你在系统中完成。详见[安装与使用](docs/getting-started.md)、[权限说明](docs/permissions.md)。
 

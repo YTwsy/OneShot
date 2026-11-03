@@ -1,6 +1,6 @@
 # 安装与使用
 
-如果仓库 Releases 已提供预发布 DMG，请先查看该版本的签名、公证与校验说明。下载后将 `OneShot.app` 拖到 Applications，再从 Applications 打开。一个 App 内包含采集组件与 MCP，不需要另行安装 Probe 或 Swift 工具链。
+从 [GitHub Releases](https://github.com/YTwsy/OneShot/releases/latest) 下载 DMG，并先查看该版本的签名、公证与校验说明。当前 0.1.0 使用 Apple Development 签名，未经 Apple 公证。下载后将 `OneShot.app` 拖到 Applications，再从 Applications 打开。一个 App 内包含采集组件与 MCP，不需要另行安装 Probe 或 Swift 工具链。
 
 此测试版未经公证，macOS 可能阻止首次打开。请先确认下载来源和 SHA-256，再按系统提示决定是否允许；不要为了运行应用关闭整机安全检查。参见 [Apple 的应用打开说明](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac)。
 

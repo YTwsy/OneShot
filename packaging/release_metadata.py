@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Versioned metadata and public signing evidence for OneShot preview builds."""
+"""Versioned metadata and public signing evidence for OneShot releases."""
 
 import argparse
 import hashlib
@@ -27,10 +27,10 @@ def sha256_file(path: Path) -> str:
 
 def validate(version: str, build_number: str, commit: str) -> str:
     core = r"(0|[1-9][0-9]*)"
-    pattern = rf"{core}\.{core}\.{core}-(alpha|beta|rc)\.{core}"
+    pattern = rf"{core}\.{core}\.{core}(?:-(alpha|beta|rc)\.{core})?"
     match = re.fullmatch(pattern, version)
     if not match or any(int(part) > 65535 for part in match.groups()[:3]):
-        raise ValueError("version must be a numeric X.Y.Z followed by -alpha.N, -beta.N or -rc.N; no leading zeros")
+        raise ValueError("version must be a numeric X.Y.Z, optionally followed by -alpha.N, -beta.N or -rc.N; no leading zeros")
     if not re.fullmatch(r"[1-9][0-9]{0,3}", build_number):
         raise ValueError("build number must be a positive integer of at most 4 digits")
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
@@ -126,7 +126,7 @@ def bundle_metadata(version: str, build_number: str, commit: str, capture: bool 
         "CFBundleIconFile": "OneShot.icns",
         "OneShotReleaseTag": "v" + version,
         "OneShotSourceCommit": commit,
-        "OneShotDistributionChannel": "prerelease",
+        "OneShotDistributionChannel": "prerelease" if "-" in version else "release",
         "OneShotSigningMode": signing_mode,
         "OneShotSigningStatus": signing_mode + "-unnotarized",
         "NSScreenCaptureUsageDescription": "OneShot captures only the application window you select, so you can annotate the screenshot and share its interface context with an Agent.",
@@ -177,7 +177,7 @@ def write_manifest(directory: Path, version: str, build_number: str, commit: str
         "schemaVersion": 1, "product": "OneShot", "version": marketing,
         "releaseVersion": version, "tag": "v" + version, "buildNumber": build_number,
         "sourceCommit": commit, "architecture": "arm64", "minimumMacOS": "14.0",
-        "prerelease": True, "signingMode": signing_mode,
+        "prerelease": "-" in version, "signingMode": signing_mode,
         "adHocSigned": signing_mode == "ad-hoc", "developerIDSigned": signing_mode == "developer-id",
         "notarized": False, "automaticUpdates": False,
         "permissionContinuity": "not-verified",

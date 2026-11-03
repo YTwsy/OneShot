@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Build a self-contained preview from an exact, clean Git source snapshot.
+# Build a self-contained release from an exact, clean Git source snapshot.
 set -euo pipefail
 umask 022
 
@@ -15,7 +15,7 @@ oneshot_expected_team="${ONESHOT_EXPECTED_TEAM_ID:-}"
 oneshot_previous_app=""
 
 oneshot_usage() {
-  print "Usage: zsh scripts/build-release.sh --version 0.1.0-alpha.1 [--build-number 1] [--ref HEAD] [--output-dir /absolute/artifacts]"
+  print "Usage: zsh scripts/build-release.sh --version 0.1.0 [--build-number 12] [--ref HEAD] [--output-dir /absolute/artifacts]"
   print "  [--signing-mode self-signed|apple-development|developer-id|ad-hoc] --signing-identity <certificate-SHA1>"
   print "  [--signing-keychain /absolute/signing.keychain-db] [--expected-team-id TEAMID] [--previous-app /absolute/OneShot.app]"
 }

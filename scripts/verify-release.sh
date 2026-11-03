@@ -33,6 +33,8 @@ python3 "$oneshot_script_root/packaging/release_metadata.py" validate --version 
   --build-number "$oneshot_build_number" --commit "$oneshot_commit" --signing-mode "$oneshot_signing_mode" > /dev/null
 oneshot_capture="$oneshot_app/Contents/Helpers/OneShot Capture.app"
 oneshot_marketing="${oneshot_version%%-*}"
+oneshot_channel=release
+[[ "$oneshot_version" != *-* ]] || oneshot_channel=prerelease
 
 oneshot_expect_plist() {
   local oneshot_plist="$1" oneshot_key="$2" oneshot_expected="$3"
@@ -50,7 +52,7 @@ for oneshot_bundle in "$oneshot_app" "$oneshot_capture"; do
   oneshot_expect_plist "$oneshot_plist" LSMinimumSystemVersion 14.0
   oneshot_expect_plist "$oneshot_plist" OneShotReleaseTag "v$oneshot_version"
   oneshot_expect_plist "$oneshot_plist" OneShotSourceCommit "$oneshot_commit"
-  oneshot_expect_plist "$oneshot_plist" OneShotDistributionChannel prerelease
+  oneshot_expect_plist "$oneshot_plist" OneShotDistributionChannel "$oneshot_channel"
   oneshot_expect_plist "$oneshot_plist" OneShotSigningStatus "${oneshot_signing_mode}-unnotarized"
   if oneshot_recorded_mode="$(plutil -extract OneShotSigningMode raw -o - "$oneshot_plist" 2>/dev/null)"; then
     [[ "$oneshot_recorded_mode" == "$oneshot_signing_mode" ]] || { print -u2 -- "Inconsistent signing mode in bundle."; exit 65; }

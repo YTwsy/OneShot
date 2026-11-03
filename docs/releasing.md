@@ -1,6 +1,8 @@
 # 构建与发布
 
-OneShot 支持 macOS 14+ 与 Apple Silicon（arm64），使用 MIT License，目前为 Pre-release，采用手动下载替换更新。历史 build 4 为 ad-hoc 签名；截至 2026-10-28，本地 build 10 的构建清单记录 Apple Development 签名，来源为 `6fec1ce5ea42`，仍未经 Apple 公证。这不代表已经发布 GitHub Release，也不代表 Developer ID 分发验收完成。实际下载包以对应版本的发布说明及构建清单为准。
+OneShot 支持 macOS 14+ 与 Apple Silicon（arm64），使用 MIT License，采用手动下载替换更新。当前正式版本为 0.1.0（build 12），通过 GitHub Actions 构建，使用 Apple Development 签名，未经 Apple 公证。下载入口为 [GitHub Releases](https://github.com/YTwsy/OneShot/releases/latest)，具体状态以该版本说明与构建清单为准。
+
+版本支持 `X.Y.Z` 正式版和 `X.Y.Z-alpha.N`、`-beta.N`、`-rc.N` 预发布版。包内渠道、构建清单与 GitHub Release 标记跟随版本；发布渠道与签名、公证、实机权限验收分别记录。
 
 首次公开前参见[公开发布检查表](public-release-checklist.md)。下述证书构建流程需要先配置签名身份；加入工作流本身不会改变已安装版本或现有授权。
 
@@ -52,7 +54,7 @@ security find-identity -v -p codesigning
 
 ```sh
 export ONESHOT_SIGNING_IDENTITY='<40-character-certificate-SHA1>'
-zsh scripts/build-release.sh --version 0.1.0-alpha.1 --build-number 5 --ref HEAD \
+zsh scripts/build-release.sh --version 0.1.0 --build-number 12 --ref HEAD \
   --signing-mode apple-development
 ```
 
@@ -101,18 +103,18 @@ Apple 模式可在 environment Variables 设置 `ONESHOT_EXPECTED_TEAM_ID`，用
 
 旧 ad-hoc → 首个证书版本需要单独作为迁移验收，不能拿它证明后续证书版本之间失去权限。不要自动重置 TCC、代替用户批准权限或关闭系统安全检查。权限恢复步骤见[权限引导](permissions.md)。
 
-其他实机验收包括 DMG 只读挂载和安装、下载后的 Gatekeeper 首次打开、首次授权与失败恢复、连续快捷键、未保存标注期间的新采集、关闭编辑窗口后再采集、HUD 焦点和持续 stdio 的 MCP。签名检查不代替这些验收，未完成项保留在预发布说明中。
+其他实机验收包括 DMG 只读挂载和安装、下载后的 Gatekeeper 首次打开、首次授权与失败恢复、连续快捷键、未保存标注期间的新采集、关闭编辑窗口后再采集、HUD 焦点和持续 stdio 的 MCP。签名检查不代替这些验收，未完成项保留在发布说明中。
 
 ## 公开发布
 
-文档中的计划目标是 `YTwsy/OneShot`，但远端以实际确认和配置为准。首次公开前确认目标、可见性、推送范围、版本标签与产物，并检查准备公开的文件和历史是否含凭据、原始截图、AX／OCR 正文或个人路径。保留当前 Git 作者身份。`Captures/`、`Ref/`、`LocalEvidence/`、`Edits/`、`.build/`、`artifacts/` 留在本地。
+发布仓库为 [`YTwsy/OneShot`](https://github.com/YTwsy/OneShot)，默认分支为 `main`。首次公开前确认目标、可见性、推送范围、版本标签与产物，并检查准备公开的文件和历史是否含凭据、原始截图、AX／OCR 正文或个人路径。保留当前 Git 作者身份。`Captures/`、`Ref/`、`LocalEvidence/`、`Edits/`、`.build/`、`artifacts/` 留在本地。
 
-在相同已验证提交打标签，以 Pre-release 发布 DMG、校验和及构建清单，再核对远端标签和实际产物。构建与签名流程本身不发布 Release，也不证明公证或实机升级验收通过。
+在相同已验证提交打标签，发布 DMG、校验和及构建清单，再核对远端标签和实际产物。正式版标为 Release / Latest，带 alpha、beta 或 rc 后缀的版本标为 Pre-release。构建与签名流程本身不发布 Release，也不证明公证或实机升级验收通过。
 
 ### 从 GitHub 产物发布已有草稿
 
-`.github/workflows/publish-preview.yml` 在默认分支上手动触发，适用于私有或公开仓库。输入成功的 `Signed preview build` 的 `build_run_id`，以及已存在的 Pre-release 草稿 `release_id`。草稿的 `target_commitish` 必须是该构建的完整源码提交，标签必须与构建清单一致。
+`.github/workflows/publish-preview.yml` 在默认分支上手动触发，适用于私有或公开仓库。输入成功的 `Signed release build` 的 `build_run_id`，以及已存在的 Release 草稿 `release_id`。草稿的预发布标记必须与构建版本对应，`target_commitish` 必须是该构建的完整源码提交，标签必须与构建清单一致。
 
-工作流检查构建来自同一仓库的默认分支、指定签名工作流及成功的手动运行，下载对应 attempt 的产物并校验摘要。随后核对清单中的文件哈希，仅上传 DMG、校验和、源码归档、构建清单及签名报告。已经上传且哈希一致的附件会保留；不覆盖不一致或未完成的附件，不向已经发布的版本追加文件。五项附件齐全且哈希正确后，才将草稿发布为 Pre-release。
+工作流检查构建来自同一仓库的默认分支、指定签名工作流及成功的手动运行，下载对应 attempt 的产物并校验摘要。随后核对清单中的文件哈希，仅上传 DMG、校验和、源码归档、构建清单及签名报告；有升级基线时再上传身份兼容报告。已经上传且哈希一致的附件会保留；不覆盖不一致或未完成的附件，不向已经发布的版本追加文件。五项附件（有升级基线时六项）齐全且哈希正确后，才按构建渠道发布草稿；正式版同时设为 Latest。
 
 该步骤使用仓库 `GITHUB_TOKEN` 的 `contents: write` 与 `actions: read`，不读取签名 Secrets，也不重新编译 App。构建提交可以早于后续的纯发布工作流修正；Release 始终绑定经验证的构建提交。远端未完成的上传占位项需要先确认来源并单独处理，不由工作流自动删除。

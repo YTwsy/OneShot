@@ -1,14 +1,14 @@
-name: Publish verified preview
+name: Publish verified release
 
 on:
   workflow_dispatch:
     inputs:
       build_run_id:
-        description: Successful Signed preview build run in this repository
+        description: Successful signed-build.yml run in this repository
         required: true
         type: string
       release_id:
-        description: Existing draft Pre-release targeting that exact source commit
+        description: Existing draft Release targeting that exact source commit and channel
         required: true
         type: string
 
@@ -47,7 +47,7 @@ jobs:
           assert run['event'] == 'workflow_dispatch' and run['head_branch'] == repository['default_branch']
           assert run['status'] == 'completed' and run['conclusion'] == 'success'
           release = api(f'repos/{repo}/releases/{release_id}')
-          assert release['prerelease'] and release['target_commitish'] == run['head_sha']
+          assert release['target_commitish'] == run['head_sha']
           artifacts = api(f'repos/{repo}/actions/runs/{run_id}/artifacts?per_page=100')
           assert artifacts['total_count'] <= 100
           expected = f"oneshot-signed-{run_id}-{run['run_attempt']}"
@@ -72,7 +72,7 @@ jobs:
           ONESHOT_SOURCE_COMMIT: ${{ steps.source.outputs.source_commit }}
         run: |
           python3 - <<'PY'
-          import hashlib, json, os, subprocess
+          import hashlib, json, os, re, subprocess
           from pathlib import Path
           from urllib.parse import quote
           def api(path, *arguments):
@@ -84,26 +84,35 @@ jobs:
           release_path = f'repos/{repo}/releases/{release_id}'
           release = api(release_path)
           assert metadata['sourceCommit'] == os.environ['ONESHOT_SOURCE_COMMIT'] == release['target_commitish']
-          assert metadata['tag'] == release['tag_name'] and metadata['prerelease'] and release['prerelease']
+          version = metadata['releaseVersion']
+          core = r'(0|[1-9][0-9]*)'
+          assert re.fullmatch(rf'{core}\.{core}\.{core}(?:-(alpha|beta|rc)\.{core})?', version)
+          prerelease = '-' in version
+          assert type(metadata['prerelease']) is bool and metadata['prerelease'] == prerelease
+          assert metadata['tag'] == release['tag_name'] == 'v' + version
+          assert release['prerelease'] == prerelease, 'Draft and build release channels must match'
           assert metadata['signingMode'] in ('apple-development', 'developer-id', 'self-signed')
           files = {manifest.name: manifest}
           for entry in metadata['files']:
               name = entry['file']
               assert Path(name).name == name
-              assert name == 'code-signing.json' or name.endswith(('.dmg', '.dmg.sha256', '-source.tar.gz'))
+              assert name in ('code-signing.json', 'identity-compatibility.json') or name.endswith(('.dmg', '.dmg.sha256', '-source.tar.gz'))
               path = root / name
               assert path.is_file() and not path.is_symlink()
               assert path.stat().st_size == entry['bytes']
               assert hashlib.sha256(path.read_bytes()).hexdigest() == entry['sha256']
               assert name not in files
               files[name] = path
-          assert len(files) == 5
+          assert len(files) == (6 if 'identity-compatibility.json' in files else 5)
           assert sum(name.endswith('.dmg') for name in files) == 1
           assert sum(name.endswith('.dmg.sha256') for name in files) == 1
           assert sum(name.endswith('-source.tar.gz') for name in files) == 1
           signing = json.loads((root / 'code-signing.json').read_text())
           assert signing == metadata['signingReport']
           assert signing['signingMode'] == metadata['signingMode']
+          if 'identity-compatibility.json' in files:
+              compatibility = json.loads(files['identity-compatibility.json'].read_text())
+              assert compatibility['identityCompatible'] is True
           assets = api(release_path + '/assets?per_page=100')
           existing = {a['name']: a for a in assets}
           assert len(existing) == len(assets) and set(existing) <= set(files)
@@ -122,9 +131,11 @@ jobs:
           assert len(final_assets) == len(files) and {a['name'] for a in final_assets} == set(files)
           assert all(matches(a, files[a['name']]) for a in final_assets)
           if release['draft']:
-              release = api(release_path, '--method', 'PATCH', '-F', 'draft=false', '-F', 'prerelease=true')
-          assert not release['draft'] and release['prerelease']
+              release = api(release_path, '--method', 'PATCH', '-F', 'draft=false',
+                            '-F', 'prerelease=' + str(prerelease).lower(),
+                            '-f', 'make_latest=' + ('false' if prerelease else 'true'))
+          assert not release['draft'] and release['prerelease'] == prerelease
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as output:
-              output.write('Published verified Pre-release: ' + release['html_url'] + '\n\n')
-              output.write('Source: `' + metadata['sourceCommit'] + '`. All five asset hashes verified.\n')
+              output.write('Published verified ' + ('Pre-release' if prerelease else 'Release') + ': ' + release['html_url'] + '\n\n')
+              output.write('Source: `' + metadata['sourceCommit'] + '`. All ' + str(len(files)) + ' asset hashes verified.\n')
           PY

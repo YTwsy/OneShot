@@ -1,4 +1,4 @@
-OneShot Preview — macOS 14+ / Apple Silicon
+OneShot — macOS 14+ / Apple Silicon
 
 Install
 1. Drag OneShot.app to Applications.
@@ -9,7 +9,7 @@ Install
    macOS may retain older entries named OneShot Capture; identify the current
    component using the path shown in the permission guide.
 
-This preview has NOT been notarized by Apple. The About window and accompanying
+This build has NOT been notarized by Apple. The About window and accompanying
 release-manifest.json identify the signing mode of this particular build:
 self-signed, Apple Development, Developer ID, or explicitly selected ad-hoc.
 A certificate signature alone does not mean Apple notarization or Gatekeeper
@@ -28,12 +28,15 @@ does not send it to a remote service. Review captures before sharing them.
 MCP command after installation:
   /Applications/OneShot.app/Contents/Helpers/oneshot-mcp
 Arguments:
-  --handoff /absolute/path/to/one-export
+  --library
+Connect Codex or Claude Code in OneShot's Agent connections and materials page.
+Paste the versioned material reference into the agent conversation after handoff.
+The legacy --handoff /absolute/path/to/one-export mode remains available.
 
 License: MIT (included in this distribution)
 
 安装：将 OneShot.app 拖到 Applications，推出磁盘映像后打开应用。
-支持 macOS 14 及以上、Apple Silicon。本预发布包未经 Apple 公证；实际签名
+支持 macOS 14 及以上、Apple Silicon。本安装包未经 Apple 公证；实际签名
 方式见“关于 OneShot”与 release-manifest.json。请阅读系统提示与发布说明。
 应用与内置采集组件的显示名称均为 OneShot。采集需要批准屏幕录制与辅助功能
 权限；系统可能仍显示旧版 OneShot Capture 条目，请按权限引导中的当前组件路径核对。

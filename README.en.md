@@ -4,9 +4,9 @@
 
 OneShot is a native macOS window capture and annotation tool. Capture a window with a shortcut, reference controls in your feedback, and hand the screenshot and captured UI context to your agent. Use it for UI changes, bug reports, and design feedback.
 
-[简体中文](README.md) · [Getting started (中文)](docs/getting-started.md) · [Agent connection (中文)](docs/agent-handoff.md) · [Development (中文)](docs/development.md) · [Changelog](CHANGELOG.md)
+[Latest release](https://github.com/YTwsy/OneShot/releases/latest) · [简体中文](README.md) · [Getting started (中文)](docs/getting-started.md) · [Agent connection (中文)](docs/agent-handoff.md) · [Development (中文)](docs/development.md) · [Changelog](CHANGELOG.md)
 
-**macOS 14+ · Apple Silicon · Native SwiftUI · Local capture · MIT · Pre-release**
+**macOS 14+ · Apple Silicon · Native SwiftUI · Local capture · MIT · v0.1.0**
 
 ## Make feedback specific
 
@@ -48,11 +48,11 @@ Start with `read_handoff`, then use `read_details` or `read_image` as needed. **
 
 ## Installation and status
 
-Requires **macOS 14+ and Apple Silicon (arm64)**. OneShot is a pre-release with manual download-and-replace updates.
+Requires **macOS 14+ and Apple Silicon (arm64)**. The current stable release is **0.1.0 (build 12)**, with manual download-and-replace updates.
 
-If this repository has a downloadable package under Releases, read its release notes and verify its SHA-256 before dragging `OneShot.app` into Applications. The app bundles the capture helper and MCP server; package users do not need Swift. If no package has been published yet, [build from source](docs/development.md).
+Download the DMG from [GitHub Releases](https://github.com/YTwsy/OneShot/releases/latest), read the release notes, and verify its SHA-256 before dragging `OneShot.app` into Applications. The app bundles the capture helper and MCP server; package users do not need Swift. You can also [build from source](docs/development.md).
 
-**The current packaging workflow does not notarize builds with Apple.** Apple Development signing is not Developer ID distribution signing. Check the specific package's release notes and manifest for its status. Follow [Apple's instructions for opening an app from an unknown developer](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac) if macOS blocks first launch; do not disable system-wide security checks.
+**0.1.0 uses Apple Development signing and is not notarized by Apple.** The stable release channel does not change this signing status. Apple Development signing is not Developer ID distribution signing. Check the specific package's release notes and manifest for its status. Follow [Apple's instructions for opening an app from an unknown developer](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac) if macOS blocks first launch; do not disable system-wide security checks.
 
 Capture requires **Screen Recording** and **Accessibility** permissions. OneShot explains and requests them separately; you approve them in macOS. See [permissions (中文)](docs/permissions.md).
 

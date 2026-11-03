@@ -4,6 +4,15 @@
 
 暂无未发布变更。
 
+## 0.1.0 build 12 — 2026-11-03
+
+首个公开的正式 Release，功能基于 build 11，通过 GitHub Actions 重新构建。使用同一 Apple Development 身份，仍未经 Apple 公证。
+
+- 构建工具支持正式版号，应用内渠道、版本标签和构建清单与 `v0.1.0` 一致。
+- 发布工作流验证正式版与预发布渠道，核对全部附件哈希后发布；正式版设为 Latest。
+- 以 build 11 的 GitHub 构建为签名身份兼容基线，发布包含三个组件的双向代码身份比较报告；实际升级权限保持仍需用户 Mac 验证。
+- 中英文 README 提供正式下载入口，保留标注和 Agent 交付流程动态图；更新安装与发布说明。
+
 ## 0.1.0-alpha.1 build 11 — 2026-11-03
 
 首个 GitHub Actions 构建的私有预发布版本，复用 Apple Development 身份，未经 Apple 公证。
