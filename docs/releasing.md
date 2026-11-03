@@ -74,7 +74,7 @@ python3 packaging/signing.py compare \
 
 `.github/workflows/build.yml` 执行普通编译和测试，不读取发布签名私钥。两份工作流的 `python3 scripts/test_signing_integration.py` 使用独立的两天临时证书，真正签出代码不同的两代 arm64 组件，校验 DR 兼容并清理证书、私钥和钥匙串查找项；该测试身份不会用于发布。`.github/workflows/signed-build.yml` 提供手动触发的证书构建，只允许默认分支，使用 GitHub environment `signing`，不会自动推送、打标签或创建 Release。
 
-在**确认目标仓库后**配置 `signing` environment，并设置 required reviewers 与仅允许默认分支部署。工作流引用 environment 不会自动替代这些仓库保护设置。配置以下 environment Secrets：
+在**确认目标仓库后**配置 `signing` environment，并限制为仅允许默认分支部署；套餐支持时再设置 required reviewers。GitHub Pro / Team 私有仓库的环境不支持 required reviewers，不能把环境名称本身当成审批保护，参见 [GitHub 环境保护说明](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)。工作流引用 environment 不会自动替代仓库保护设置。配置以下 environment Secrets：
 
 | Secret | 内容 |
 | --- | --- |
@@ -107,4 +107,12 @@ Apple 模式可在 environment Variables 设置 `ONESHOT_EXPECTED_TEAM_ID`，用
 
 文档中的计划目标是 `YTwsy/OneShot`，但远端以实际确认和配置为准。首次公开前确认目标、可见性、推送范围、版本标签与产物，并检查准备公开的文件和历史是否含凭据、原始截图、AX／OCR 正文或个人路径。保留当前 Git 作者身份。`Captures/`、`Ref/`、`LocalEvidence/`、`Edits/`、`.build/`、`artifacts/` 留在本地。
 
-在相同已验证提交打标签，以 Pre-release 发布 DMG、校验和及构建清单，再核对远端标签和实际产物。当前脚本及工作流不创建远程仓库，也不声称已发布、公证或通过实机升级验收。
+在相同已验证提交打标签，以 Pre-release 发布 DMG、校验和及构建清单，再核对远端标签和实际产物。构建与签名流程本身不发布 Release，也不证明公证或实机升级验收通过。
+
+### 从 GitHub 产物发布已有草稿
+
+`.github/workflows/publish-preview.yml` 在默认分支上手动触发，适用于私有或公开仓库。输入成功的 `Signed preview build` 的 `build_run_id`，以及已存在的 Pre-release 草稿 `release_id`。草稿的 `target_commitish` 必须是该构建的完整源码提交，标签必须与构建清单一致。
+
+工作流检查构建来自同一仓库的默认分支、指定签名工作流及成功的手动运行，下载对应 attempt 的产物并校验摘要。随后核对清单中的文件哈希，仅上传 DMG、校验和、源码归档、构建清单及签名报告。已经上传且哈希一致的附件会保留；不覆盖不一致或未完成的附件，不向已经发布的版本追加文件。五项附件齐全且哈希正确后，才将草稿发布为 Pre-release。
+
+该步骤使用仓库 `GITHUB_TOKEN` 的 `contents: write` 与 `actions: read`，不读取签名 Secrets，也不重新编译 App。构建提交可以早于后续的纯发布工作流修正；Release 始终绑定经验证的构建提交。远端未完成的上传占位项需要先确认来源并单独处理，不由工作流自动删除。
