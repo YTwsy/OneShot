@@ -56,9 +56,6 @@ jobs:
       ONESHOT_BUILD_NUMBER: ${{ inputs.build_number }}
       ONESHOT_SIGNING_MODE: ${{ inputs.signing_mode }}
       ONESHOT_BASELINE_RUN_ID: ${{ inputs.baseline_run_id }}
-      ONESHOT_SIGNING_DIRECTORY: ${{ runner.temp }}/oneshot-signing-${{ github.run_id }}-${{ github.run_attempt }}
-      ONESHOT_ARTIFACT_ROOT: ${{ runner.temp }}/oneshot-artifacts
-      ONESHOT_PUBLIC_ARTIFACTS: ${{ runner.temp }}/oneshot-public-artifacts
       ONESHOT_PREVIOUS_APP: ''
       ONESHOT_EXPECTED_TEAM_ID: ${{ vars.ONESHOT_EXPECTED_TEAM_ID }}
     steps:
@@ -66,6 +63,21 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Initialize runner paths
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          temporary = Path(os.environ['RUNNER_TEMP'])
+          paths = {
+              'ONESHOT_SIGNING_DIRECTORY': temporary / ('oneshot-signing-' + os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT']),
+              'ONESHOT_ARTIFACT_ROOT': temporary / 'oneshot-artifacts',
+              'ONESHOT_PUBLIC_ARTIFACTS': temporary / 'oneshot-public-artifacts',
+          }
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              for name, path in paths.items():
+                  output.write(name + '=' + str(path) + '\n')
+          PY
       - name: Validate inputs
         run: |
           set -euo pipefail
